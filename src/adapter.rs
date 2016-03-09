@@ -5,7 +5,7 @@ use foxbox_taxonomy::values::*;
 
 /// A witness that we are currently watching for a value.
 /// Watching stops when the guard is dropped.
-pub trait WatchGuard {
+pub trait AdapterWatchGuard {
 }
 
 /// An API that adapter managers must implement
@@ -120,5 +120,5 @@ pub trait Adapter: Send {
     /// Request that a value be sent to a channel.
     fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), AdapterError>;
 
-    fn register_watch(&self, id: &Id<Getter>, threshold: Option<Range>, cb: Box<Fn(Value) + Send>) -> Result<Box<WatchGuard>, AdapterError>;
+    fn register_watch(&self, id: &Id<Getter>, threshold: Option<Range>, cb: Box<Fn(Value) + Send>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
 }

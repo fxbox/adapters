@@ -2,7 +2,7 @@
 
 #![allow(dead_code)] // Implementation in progress, code isn't called yet.
 
-use adapter::{ Adapter, WatchGuard };
+use adapter::{ Adapter, AdapterWatchGuard };
 use transact::InsertInMap;
 
 use foxbox_taxonomy::api::{ AdapterError, APIHandle, Error as APIError, WatchEvent, ResultMap, FnResultMap };
@@ -20,42 +20,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
-
-
-/*
-struct WatchRemover {
-    witness: WatchWitness
-}
-
-struct WatchGuardImpl {
-    owner: Rc<WatchMap>,
-    witness: WatchWitness,
-    adapter_guards: Vec<Box<WatchGuard>>
-}
-impl WatchGuardImpl {
-    fn new(owner: Rc<WatchMap>, witness: WatchWitness, guards: Vec<Box<WatchGuard>>) -> Self {
-        WatchGuardImpl {
-            owner: owner,
-            witness: witness,
-            adapter_guards: guards,
-        }
-    }
-}
-
-impl WatchGuard for WatchGuardImpl {}
-
-impl Drop for WatchGuardImpl {
-    fn drop(&mut self) {
-        // 1. Drop from the WatchMap, preventing future channels from triggering the watch.
-        self.owner.remove(self.witness);
-
-        // 2. FIXME: Remove from the list of getters, preventing current channels from
-        //    triggering the watch.
-
-        // 3. Done automatically: Drop the adapter_guards. This will disconnect from the adapters.
-    }
-}
-*/
+use std::sync::mpsc::Sender;
 
 
 /// Data and metadata on an adapter.
@@ -175,24 +140,26 @@ impl Deref for SetterData {
 struct WatcherData {
     selectors: Vec<GetterSelector>,
     range: Exactly<Range>,
-    cb: Box<Fn(WatchEvent) + Send>,
+    on_event: Box<Fn(WatchEvent) + Send>,
     key: usize,
-    guards: RefCell<Vec<Box<WatchGuard>>>,
+    guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
     getters: RefCell<HashSet<Id<Getter>>>,
+    is_dropped: Arc<AtomicBool>,
 }
 impl WatcherData {
-    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, cb: Box<Fn(WatchEvent) + Send>) -> Self {
+    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Box<Fn(WatchEvent) + Send>) -> Self {
         WatcherData {
             selectors: selectors,
             range: range,
             key: key,
-            cb: cb,
+            on_event: on_event,
+            is_dropped: is_dropped.clone(),
             guards: RefCell::new(Vec::new()),
             getters: RefCell::new(HashSet::new()),
         }
     }
 
-    fn push_guard(&self, guard: Box<WatchGuard>) {
+    fn push_guard(&self, guard: Box<AdapterWatchGuard>) {
         self.guards.borrow_mut().push(guard);
     }
 
@@ -214,21 +181,52 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, cb: Box<Fn(WatchEvent) + Send>) -> Rc<WatcherData> {
+    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Box<Fn(WatchEvent) + Send>) -> Rc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
-        let watcher = Rc::new(WatcherData::new(id, selectors, range, cb));
+        let watcher = Rc::new(WatcherData::new(id, selectors, range, is_dropped, on_event));
         self.watchers.insert(id, watcher.clone());
         watcher
     }
     fn remove(&mut self, key: usize) -> Option<Rc<WatcherData>> {
         self.watchers.remove(&key)
     }
+    fn get(&self, key: usize) -> Option<&Rc<WatcherData>> {
+        self.watchers.get(&key)
+    }
 }
 
 impl Default for WatchMap {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A data structure that causes cancellation of a watch when dropped.
+pub struct WatchGuard {
+    /// The channel used to request unregistration.
+    tx: Sender<Op>,
+
+    /// The cancellation key.
+    key: usize,
+
+    /// Once dropped, the watch callbacks will stopped being called. Note
+    /// that dropping this value is not sufficient to cancel the watch, as
+    /// the adapters will continue sending updates.
+    is_dropped: Arc<AtomicBool>,
+}
+impl WatchGuard {
+    fn new(tx: Sender<Op>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+        WatchGuard {
+            tx: tx,
+            key: key,
+            is_dropped: is_dropped
+        }
+    }
+}
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Op::Execute(Execute::UnregisterChannelWatch(self.key)));
     }
 }
 
@@ -255,22 +253,19 @@ pub struct AdapterManagerState {
     //  => actually, make it a HashMap<usize, Rc<Watcher>>
 
     watchers: WatchMap,
-}
 
-impl Default for AdapterManagerState {
-    fn default() -> Self {
-        Self::new()
-    }
+    tx: Sender<Op>,
 }
 
 impl AdapterManagerState {
-    pub fn new() -> Self {
+    pub fn new(tx: Sender<Op>) -> Self {
         AdapterManagerState {
            adapter_by_id: HashMap::new(),
            service_by_id: HashMap::new(),
            getter_by_id: HashMap::new(),
            setter_by_id: HashMap::new(),
            watchers: WatchMap::new(),
+           tx: tx,
        }
     }
 
@@ -295,7 +290,7 @@ impl AdapterManagerState {
     /// # Errors
     ///
     /// Returns an error if an adapter with the same id is already present.
-    fn add_adapter(&mut self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError> { // FIXME: Add the services
+    fn add_adapter(&mut self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError> {
         let id = adapter.id();
         match self.adapter_by_id.entry(id.clone()) {
             Entry::Occupied(_) => return Err(AdapterError::DuplicateAdapter(id)),
@@ -368,6 +363,7 @@ impl AdapterManagerState {
                 Err(k) => return Err(AdapterError::DuplicateGetter(k)),
                 Ok(transaction) => transaction
             };
+        // FIXME: Check if one of the getters needs to be watched.
 
         // Insert all setters of this service in `setters`.
         // Note that they already appear in `service`, by construction.
@@ -450,25 +446,53 @@ impl AdapterManagerState {
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
     fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), AdapterError> {
+        let watchers = &mut self.watchers;
+        let getter_by_id = &mut self.getter_by_id;
         let service = match self.service_by_id.get_mut(&getter.service) {
             None => return Err(AdapterError::NoSuchService(getter.service.clone())),
             Some(service) => service
         };
-        if service.borrow().adapter != getter.adapter {
-            return Err(AdapterError::ConflictingAdapter(service.borrow().adapter.clone(), getter.adapter));
-        }
         let getters = &mut service.borrow_mut().getters;
+
         let insert_in_service = match InsertInMap::start(getters, vec![(getter.id.clone(), getter.clone())]) {
             Ok(transaction) => transaction,
             Err(id) => return Err(AdapterError::DuplicateGetter(id))
         };
-        let insert_in_getters = match InsertInMap::start(&mut self.getter_by_id, vec![(getter.id.clone(), GetterData::new(getter))]) {
-            Ok(transaction) => transaction,
-            Err(id) => return Err(AdapterError::DuplicateGetter(id))
-        };
+
+        let insert_in_getters = try!(Self::aux_add_getter(GetterData::new(getter), service, getter_by_id, watchers));
+
         insert_in_service.commit();
         insert_in_getters.commit();
         Ok(())
+    }
+
+    fn aux_add_getter<'a, 'b>(mut getter_data: GetterData, service: &Rc<RefCell<Service>>,
+        getter_by_id: &'b mut HashMap<Id<Getter>, GetterData>,
+        watchers: &mut WatchMap) -> Result<InsertInMap<'a, Id<Getter>, GetterData>, AdapterError>
+        where 'b: 'a
+    {
+        if service.borrow().adapter != getter_data.adapter {
+            return Err(AdapterError::ConflictingAdapter(service.borrow().adapter.clone(), getter_data.adapter.clone()));
+        }
+
+        // Check whether we match an ongoing watcher.
+        for watcher in &mut watchers.watchers.values() {
+            let matches = watcher.selectors.iter().find(|selector| {
+                getter_data.matches(selector)
+            }).is_some();
+            if matches {
+                getter_data.watchers.insert(watcher.clone());
+                watcher.push_getter(&getter_data.id);
+                // FIXME: Notify WatchEvent of topology change
+                // FIXME: register_single_channel_watch_values
+            };
+        }
+
+        let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
+            Ok(transaction) => transaction,
+            Err(id) => return Err(AdapterError::DuplicateGetter(id))
+        };
+        Ok(insert_in_getters)
     }
 
     /// Remove a setter previously registered on the system. Typically, called by
@@ -768,59 +792,92 @@ impl AdapterManagerState {
         results
     }
 
-    fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, cb: Box<Fn(WatchEvent) + Send + 'static>) -> () {
+    fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent) + Send + 'static>) -> WatchGuard {
         // Store the watcher. This will serve when we need to decide whether new channels
         // should be registered with this watcher.
-        let watcher = self.watchers.create(selectors, range.clone(), cb);
-
-        let dropped = Arc::new(AtomicBool::new(false)); // FIXME: Somehow, send it to the `cb`.
+        let is_dropped = Arc::new(AtomicBool::new(false));
+        let watcher = self.watchers.create(selectors.clone(), range.clone(), &is_dropped, on_event);
+        let key = watcher.key;
 
         // Find out which channels already match the selectors and attach
         // the watcher immediately.
         let adapter_by_id = &self.adapter_by_id;
-        Self::with_channels_mut(&watcher.selectors, &mut self.getter_by_id, |mut getter_data| {
+        let mut channels = Vec::new();
+        Self::with_channels_mut(&selectors, &mut self.getter_by_id, |mut getter_data| {
             getter_data.watchers.insert(watcher.clone());
             watcher.push_getter(&getter_data.id);
-            let adapter = match adapter_by_id.get(&getter_data.getter.adapter) {
-                None => return,// FIXME: Internal inconsistency, find a way to log.
+            channels.push((getter_data.id.clone(), getter_data.adapter.clone()));
+        });
+
+        for (channel_id, adapter_id) in channels.drain(..) {
+            let adapter = match adapter_by_id.get(&adapter_id) {
+                None => {
+                    debug_assert!(false, "We have a registered channel {:?} whose adapter is not registered: {:?}", &channel_id, adapter_id);
+                    // FIXME: Logging would be nice.
+                    continue
+                },
                 Some(adapter) => adapter
             };
-
             match range {
-                Exactly::Exactly(ref range) => {
-                    let dropped = dropped.clone();
-                    match adapter.register_watch(&getter_data.id, Some(range.clone()), Box::new(move |_| {
-                            if dropped.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            // FIXME: Implement watch.
-                        })) {
-                            Err(_) => {}, // FIXME: Find a way to log/report error. Possibly as a WatchEvent.
-                            Ok(guard) => watcher.push_guard(guard)
-                        };
-                }
-                Exactly::Always => {
-                    let dropped = dropped.clone();
-                    match adapter.register_watch(&getter_data.id, None, Box::new(move |_| {
-                        if dropped.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        // FIXME: Implement watch.
-                    })) {
-                        Err(_) => {}, // FIXME: Find a way to log/report error. Possibly as a WatchEvent.
-                        Ok(guard) => watcher.push_guard(guard)
-                    }
-                }
-                Exactly::Never => {
+                Exactly::Exactly(ref range) =>
+                    self.register_single_channel_watch_values(&channel_id,
+                        Some(range.clone()), &watcher,  &adapter),
+                Exactly::Always =>
+                    self.register_single_channel_watch_values(&channel_id,
+                        None, &watcher,  &adapter),
+                _ => {
                     // Nothing to watch, we are only interested in topology
                 }
             }
-        });
 
-        unimplemented!()
-        // FIXME: Handle witness drop
+        }
 
-        // FIXME: Create a guard that will call `unregister_channel_watch` once dropped.
+        // Upon drop, this data structure will immediately drop `is_dropped` and then dispatch
+        // `unregister_channel_watch` to unregister everything else.
+        WatchGuard::new(self.tx.clone(), key, is_dropped)
+    }
+
+    fn register_single_channel_watch_values(&self, channel_id: &Id<Getter>, range: Option<Range>,
+        watcher: &Rc<WatcherData>, adapter: &Box<Adapter>)
+    {
+        let tx = self.tx.clone();
+        let is_dropped = watcher.is_dropped.clone();
+        let id = channel_id.clone();
+        let key = watcher.key;
+        match adapter.register_watch(&channel_id.clone(), range, Box::new(move |value| {
+                if is_dropped.load(Ordering::Relaxed) {
+                    return;
+                }
+                let _ = tx.send(Op::Execute(Execute::TriggerWatch {
+                    key: key,
+                    event: WatchEvent::Value {
+                        from: id.clone(),
+                        value: value,
+                    }
+                }));
+            })) {
+                Err(err) => {
+                    let _ = self.tx.send(Op::Execute(Execute::TriggerWatch {
+                        key: key,
+                        event: WatchEvent::InitializationError {
+                            channel: channel_id.clone(),
+                            error: err
+                        }
+                    }));
+                },
+                Ok(guard) => watcher.push_guard(guard)
+        };
+    }
+
+    fn trigger_watch(&self, key: usize, event: WatchEvent) {
+        let watcher_data = match self.watchers.get(key) {
+            None => return, // Race condition. Don't inform clients.
+            Some(watcher_data) => watcher_data
+        };
+        if watcher_data.is_dropped.load(Ordering::Relaxed) {
+            return;
+        }
+        (watcher_data.on_event)(event);
     }
 
     /// Unregister a watch previously registered with `register_channel_watch`.
@@ -830,18 +887,21 @@ impl AdapterManagerState {
         // Remove `key` from `watchers`. This will prevent the watcher from being registered
         // automatically with any new getter.
         let mut watcher_data = match self.watchers.remove(key) {
-            None => return, // FIXME: Internal inconsistency, log.
+            None => {
+                debug_assert!(false, "Attempting to unregister a watcher that has already been removed {}", key);
+                return
+            } // FIXME: Logging would be nice.
             Some(watcher_data) => watcher_data
         };
 
         // Remove the watcher from all getters.
         for getter_id in watcher_data.getters.borrow().iter() {
             let mut getter = match self.getter_by_id.get_mut(getter_id) {
-                None => return, // FIXME: Internal inconsistency. Should log.
+                None => return, // Race condition between removing the getter and dropping the watcher.
                 Some(getter) => getter
             };
             if !getter.watchers.remove(&watcher_data) {
-                // FIXME: Internal inconsistency. Should log.
+                debug_assert!(false, "Attempting to unregister a watcher that has already been removed from its getter {}, {:?}", key, getter_id);
             }
         }
 
@@ -858,6 +918,7 @@ impl AdapterManagerState {
     pub fn execute(&mut self, msg: Execute) {
         use self::Execute::*;
         match msg {
+            // Messages that dispatch to methods
             AddAdapter { adapter, services, cb } => cb(self.add_adapter(adapter, services)),
             RemoveAdapter { id, cb } => cb(self.remove_adapter(id)),
             AddService { adapter, service, cb } => cb(self.add_service(adapter, service)),
@@ -869,22 +930,34 @@ impl AdapterManagerState {
             GetServices { selectors, cb } => cb(self.get_services(selectors)),
             AddServiceTags { selectors, tags, cb } => cb(self.add_service_tags(selectors, tags)),
             RemoveServiceTags { selectors, tags, cb } => cb(self.remove_service_tags(selectors, tags)),
-
             FetchChannelValues { selectors, cb } => cb(self.fetch_channel_values(&selectors)),
             SendChannelValues { keyvalues, cb } => cb(self.send_channel_values(keyvalues)),
+            RegisterChannelWatch { selectors, range, on_event, cb } => cb(self.register_channel_watch(selectors, range, on_event)),
 
+            // Messages that dispatch to functions
             GetGetters { selectors, cb } => cb(Self::get_channels(&selectors, &self.getter_by_id)),
             GetSetters { selectors, cb } => cb(Self::get_channels(&selectors, &self.setter_by_id)),
             AddGetterTags { selectors, tags, cb } => cb(Self::add_channel_tags(&selectors, tags, &mut self.getter_by_id)),
             AddSetterTags { selectors, tags, cb } => cb(Self::add_channel_tags(&selectors, tags, &mut self.setter_by_id)),
             RemoveGetterTags { selectors, tags, cb } => cb(Self::remove_channel_tags(&selectors, tags, &mut self.getter_by_id)),
             RemoveSetterTags { selectors, tags, cb } => cb(Self::remove_channel_tags(&selectors, tags, &mut self.setter_by_id)),
+
+            // Messages without callbacks, triggered by this thread.
+            TriggerWatch { key, event } => self.trigger_watch(key, event),
+            UnregisterChannelWatch(key) => self.unregister_channel_watch(key),
         }
     }
 }
 
 pub type Callback<T, E> = Box<FnBox(Result<T, E>) + Send>;
 pub type Infallible<T> = Box<FnBox(T) + Send>;
+
+/// Instructions sent to the back-end thread.
+pub enum Op {
+    Stop(Sender<()>),
+    Execute(Execute)
+}
+
 
 pub enum Execute {
     AddAdapter {
@@ -972,5 +1045,16 @@ pub enum Execute {
         keyvalues: Vec<(Vec<SetterSelector>, Value)>,
         cb: FnResultMap<Id<Setter>, (), APIError>
     },
+    TriggerWatch {
+        key: usize,
+        event: WatchEvent,
+    },
+    RegisterChannelWatch {
+        selectors: Vec<GetterSelector>,
+        range: Exactly<Range>,
+        on_event: Box<Fn(WatchEvent) + Send + 'static>,
+        cb: Infallible<WatchGuard>,
+    },
+    UnregisterChannelWatch(usize),
 }
 

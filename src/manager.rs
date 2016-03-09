@@ -16,12 +16,6 @@ use foxbox_taxonomy::values::{ Range, Value };
 use std::sync::mpsc::{ channel, Sender };
 use std::thread;
 
-/// Instructions sent to the back-end thread.
-enum Op {
-    Stop(Sender<()>),
-    Execute(Execute)
-}
-
 /// An implementation of the AdapterManager.
 pub struct AdapterManager {
     tx: Sender<Op>,
@@ -32,8 +26,9 @@ impl AdapterManager {
     /// This function does not attempt to load any state from the disk.
     pub fn new() -> Self {
         let (tx, rx) = channel();
+        let tx2 = tx.clone();
         thread::spawn(move || {
-            let mut state = AdapterManagerState::new();
+            let mut state = AdapterManagerState::new(tx2);
             for msg in rx.iter() {
                 match msg {
                     Op::Stop(tx) => {
@@ -351,10 +346,15 @@ impl APIHandle for AdapterManager {
     }
 
     /// Watch for any change
-    fn register_channel_watch(&self, _: Vec<GetterSelector>, _range: Exactly<Range>, _cb: Box<Fn(WatchEvent) + Send + 'static>) -> Self::WatchGuard {
-        unimplemented!()
+    fn register_channel_watch(&self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent) + Send + 'static>, cb: Infallible<Self::WatchGuard>) {
+        self.dispatch(Execute::RegisterChannelWatch {
+            selectors: selectors,
+            range: range,
+            on_event: on_event,
+            cb: cb
+        });
     }
 
     /// A value that causes a disconnection once it is dropped.
-    type WatchGuard = ();
+    type WatchGuard = WatchGuard;
 }

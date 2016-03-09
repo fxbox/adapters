@@ -14,10 +14,13 @@ use std::hash::Hash;
 /// # Example
 ///
 /// ```
+/// use std::collections::HashMap;
+/// use foxbox_adapters::transact::InsertInMap;
+///
 /// let mut map = HashMap::new();
 ///
 /// {
-///   let mut transaction = try!(InsertInMap.start(&mut map, vec![(1, 1)]));
+///   let mut transaction = InsertInMap::start(&mut map, vec![(1, 1)]).unwrap();
 ///
 /// # let some_condition = true;
 ///   if some_condition {
