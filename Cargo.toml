@@ -1,0 +1,11 @@
+[package]
+name = "foxbox_adapters"
+version = "0.1.0"
+authors = ["David Rajchenbach-Teller <dteller@mozilla.com>"]
+
+[dependencies]
+clippy = "*"
+foxbox_taxonomy = { git = "https://github.com/fxbox/adapters.git", rev = "1d82e5a" }
+serde = "^0.6"
+serde_json = "^0.6"
+serde_macros = "^0.6"
