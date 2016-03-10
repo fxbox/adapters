@@ -82,8 +82,8 @@ impl AdapterManagerHandle for AdapterManager {
     /// This method returns an error if the adapter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_service(&self, service_id: &Id<ServiceId>) -> Result<(), AdapterError> {
-        self.back_end.lock().unwrap().remove_service(service_id)
+    fn remove_service(&self, id: &Id<ServiceId>) -> Result<(), AdapterError> {
+        self.back_end.lock().unwrap().remove_service(id)
     }
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
