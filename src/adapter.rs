@@ -3,8 +3,6 @@ use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
 
-use std::sync::mpsc::Sender;
-
 /// A witness that we are currently watching for a value.
 /// Watching stops when the guard is dropped.
 pub trait AdapterWatchGuard {
@@ -125,5 +123,5 @@ pub trait Adapter: Send {
     /// Request that a value be sent to a channel.
     fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), AdapterError>;
 
-    fn register_watch(&self, id: &Id<Getter>, key: usize, threshold: Option<Range>, tx: Sender<(Id<Getter>, usize, Value)>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
+    fn register_watch(&self, id: &Id<Getter>, range: Option<Range>, cb: Box<Fn(Value)>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
 }

@@ -1,7 +1,5 @@
 //! An API for plugging in adapters.
 
-#![allow(dead_code)] // Implementation in progress, code isn't called yet.
-
 use adapter::{ Adapter, AdapterWatchGuard };
 use transact::InsertInMap;
 
@@ -18,7 +16,7 @@ use std::hash::{ Hash, Hasher };
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::{ Arc, Mutex };
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{ AtomicBool, Ordering };
 use std::sync::mpsc::Sender;
 
 /// Data and metadata on an adapter.
@@ -248,6 +246,7 @@ impl WatchGuard {
 }
 impl Drop for WatchGuard {
     fn drop(&mut self) {
+        self.is_dropped.store(true, Ordering::Relaxed);
         self.owner.lock().unwrap().unregister_channel_watch(self.key)
     }
 }
@@ -400,18 +399,6 @@ impl AdapterManagerState {
             result += 1;
         });
         result
-    }
-
-    /// Iterate over all setter channels that match any selector in a slice.
-    fn with_setters<F>(&mut self, selectors: &[SetterSelector], mut cb: F) where F: FnMut(&mut SetterData) {
-        for (_, setter_data) in &mut self.setter_by_id {
-            let matches = selectors.iter().find(|selector| {
-                selector.matches(&setter_data.setter)
-            }).is_some();
-            if matches {
-                cb(setter_data);
-            }
-        }
     }
 
     /*
@@ -855,6 +842,10 @@ impl AdapterManagerState {
     pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Sender<WatchEvent>) -> (usize, Arc<AtomicBool>) {
         // Store the watcher. This will serve when we need to decide whether new channels
         // should be registered with this watcher.
+        let tx = match self.tx_watchers {
+            None => panic!("Internal inconsistency. tx_watchers should be set during construction."),
+            Some(ref tx) => tx.clone()
+        };
         let is_dropped = Arc::new(AtomicBool::new(false));
         let watcher = self.watchers.lock().unwrap().create(selectors.clone(), range.clone(), &is_dropped, on_event.clone());
         let key = watcher.key;
@@ -883,7 +874,16 @@ impl AdapterManagerState {
                 Exactly::Always => None,
                 _ => continue // Nothing to watch, we are only interested in topology
             };
-            match adapter.register_watch(&channel_id.clone(), watcher.key, range, unimplemented!()) {
+            let id = channel_id.clone();
+            let tx = tx.clone();
+            let cb = move |value| {
+                let _ = tx.send(OpWatcher::WatchNotification {
+                    id: id.clone(),
+                    key: key,
+                    value: value
+                });
+            };
+            match adapter.register_watch(&channel_id.clone(), range, Box::new(cb)) {
                 Err(err) => {
                     let event = WatchEvent::InitializationError {
                         channel: channel_id.clone(),
@@ -931,150 +931,4 @@ impl AdapterManagerState {
 
         // At this stage, `watcher_data` has no reference left. All its `guards` will be dropped.
     }
-/*
-    /// Dispatch instructions received from the front-end thread.
-    pub fn execute(&mut self, msg: Execute) {
-        use self::Execute::*;
-        match msg {
-            // Messages that dispatch to methods
-            AddAdapter { adapter, services, cb } => cb(self.add_adapter(adapter, services)),
-            RemoveAdapter { id, cb } => cb(self.remove_adapter(id)),
-            AddService { adapter, service, cb } => cb(self.add_service(adapter, service)),
-            RemoveService { adapter, id, cb } => cb(self.remove_service(adapter, id)),
-            AddSetter { setter, cb } => cb(self.add_setter(setter)),
-            RemoveSetter { id, cb } => cb(self.remove_setter(id)),
-            AddGetter { setter, cb } => cb(self.add_getter(setter)),
-            RemoveGetter { id, cb } => cb(self.remove_getter(id)),
-            GetServices { selectors, cb } => cb(self.get_services(selectors)),
-            AddServiceTags { selectors, tags, cb } => cb(self.add_service_tags(selectors, tags)),
-            RemoveServiceTags { selectors, tags, cb } => cb(self.remove_service_tags(selectors, tags)),
-            FetchChannelValues { selectors, cb } => cb(self.fetch_channel_values(&selectors)),
-            SendChannelValues { keyvalues, cb } => cb(self.send_channel_values(keyvalues)),
-            RegisterChannelWatch { selectors, range, on_event, cb } => cb(self.register_channel_watch(selectors, range, on_event)),
-
-            // Messages that dispatch to functions
-            GetGetters { selectors, cb } => cb(Self::get_channels(&selectors, &self.getter_by_id)),
-            GetSetters { selectors, cb } => cb(Self::get_channels(&selectors, &self.setter_by_id)),
-            AddGetterTags { selectors, tags, cb } => cb(Self::add_channel_tags(&selectors, tags, &mut self.getter_by_id)),
-            AddSetterTags { selectors, tags, cb } => cb(Self::add_channel_tags(&selectors, tags, &mut self.setter_by_id)),
-            RemoveGetterTags { selectors, tags, cb } => cb(Self::remove_channel_tags(&selectors, tags, &mut self.getter_by_id)),
-            RemoveSetterTags { selectors, tags, cb } => cb(Self::remove_channel_tags(&selectors, tags, &mut self.setter_by_id)),
-
-            // Messages without callbacks, triggered by this thread.
-            TriggerWatch { key, event } => self.trigger_watch(key, event),
-            UnregisterChannelWatch(key) => self.unregister_channel_watch(key),
-        }
-    }
-    */
 }
-
-/*
-pub type Callback<T, E> = Box<FnBox(Result<T, E>) + Send>;
-pub type Infallible<T> = Box<FnBox(T) + Send>;
-
-/// Instructions sent to the back-end thread.
-pub enum Op {
-    Stop(Sender<()>),
-    Execute(Execute)
-}
-
-
-pub enum Execute {
-    AddAdapter {
-        adapter: Box<Adapter>,
-        services: Vec<Service>,
-        cb: Callback<(), AdapterError>
-    },
-    RemoveAdapter {
-        id: Id<AdapterId>,
-        cb: Callback<(), AdapterError>
-    },
-    AddService {
-        adapter: Id<AdapterId>,
-        service: Service,
-        cb: Callback<(), AdapterError>,
-    },
-    RemoveService {
-        adapter: Id<AdapterId>,
-        id: Id<ServiceId>,
-        cb: Callback<(), AdapterError>,
-    },
-    AddGetter {
-        setter: Channel<Getter>,
-        cb: Callback<(), AdapterError>,
-    },
-    RemoveGetter {
-        id: Id<Getter>,
-        cb: Callback<(), AdapterError>,
-    },
-    AddSetter {
-        setter: Channel<Setter>,
-        cb: Callback<(), AdapterError>,
-    },
-    RemoveSetter {
-        id: Id<Setter>,
-        cb: Callback<(), AdapterError>,
-    },
-    GetServices {
-        selectors: Vec<ServiceSelector>,
-        cb: Infallible<Vec<Service>>
-    },
-    AddServiceTags {
-        selectors: Vec<ServiceSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>
-    },
-    RemoveServiceTags {
-        selectors: Vec<ServiceSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>
-    },
-    GetGetters {
-        selectors: Vec<GetterSelector>,
-        cb: Infallible<Vec<Channel<Getter>>>
-    },
-    AddGetterTags {
-        selectors: Vec<GetterSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>,
-    },
-    RemoveGetterTags {
-        selectors: Vec<GetterSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>,
-    },
-    GetSetters {
-        selectors: Vec<SetterSelector>,
-        cb: Infallible<Vec<Channel<Setter>>>
-    },
-    AddSetterTags {
-        selectors: Vec<SetterSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>,
-    },
-    RemoveSetterTags {
-        selectors: Vec<SetterSelector>,
-        tags: Vec<String>,
-        cb: Infallible<usize>,
-    },
-    FetchChannelValues {
-        selectors: Vec<GetterSelector>,
-        cb: FnResultMap<Id<Getter>, Option<Value>, APIError>
-    },
-    SendChannelValues {
-        keyvalues: Vec<(Vec<SetterSelector>, Value)>,
-        cb: FnResultMap<Id<Setter>, (), APIError>
-    },
-    TriggerWatch {
-        key: usize,
-        event: WatchEvent,
-    },
-    RegisterChannelWatch {
-        selectors: Vec<GetterSelector>,
-        range: Exactly<Range>,
-        on_event: Box<Fn(WatchEvent) + Send + 'static>,
-        cb: Infallible<WatchGuard>,
-    },
-    UnregisterChannelWatch(usize),
-}
-*/
