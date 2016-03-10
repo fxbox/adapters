@@ -1,4 +1,4 @@
-#![feature(custom_derive, plugin, fnbox)]
+#![feature(custom_derive, plugin)]
 #![plugin(clippy)]
 
 extern crate foxbox_taxonomy;
