@@ -257,10 +257,13 @@ pub struct AdapterManagerState {
 impl AdapterManagerState {
     /// Auxiliary function to remove a service, once the mutex has been acquired.
     /// Clients should rather use AdapterManager::remove_service.
-    fn aux_remove_service(&mut self, id: &Id<ServiceId>) -> Result<(), AdapterError> {
-        let service = match self.service_by_id.remove(&id) {
+    fn aux_remove_service(&mut self, id: &Id<ServiceId>) -> Result<Id<AdapterId>, AdapterError> {
+        let (adapter, service) = match self.service_by_id.remove(&id) {
             None => return Err(AdapterError::NoSuchService(id.clone())),
-            Some(service) => service,
+            Some(service) => {
+                let adapter = service.borrow().adapter.clone();
+                (adapter, service)
+            }
         };
         for id in service.borrow().getters.keys() {
             let _ignored = self.getter_by_id.remove(id);
@@ -268,7 +271,7 @@ impl AdapterManagerState {
         for id in service.borrow().setters.keys() {
             let _ignored = self.setter_by_id.remove(id);
         }
-        Ok(())
+        Ok(adapter)
     }
 
     fn aux_add_getter<'a, 'b>(mut getter_data: GetterData, service: &Rc<RefCell<Service>>,
@@ -421,6 +424,11 @@ impl AdapterManagerState {
     /// Returns an error if an adapter with the same id is already present.
     pub fn add_adapter(&mut self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError> {
         let id = adapter.id();
+        for service in &services {
+            if service.adapter != id {
+                return Err(AdapterError::ConflictingAdapter(service.adapter.clone(), id))
+            }
+        }
         match self.adapter_by_id.entry(id.clone()) {
             Entry::Occupied(_) => return Err(AdapterError::DuplicateAdapter(id)),
             Entry::Vacant(entry) => {
@@ -430,12 +438,12 @@ impl AdapterManagerState {
         let mut added = Vec::with_capacity(services.len());
         for service in services {
             let service_id = service.id.clone();
-            match self.add_service(&id, service) {
+            match self.add_service(service) {
                 Ok(_) => added.push(service_id),
                 Err(err) => {
                     // Rollback everything
                     for service in added {
-                        let _ignored = self.remove_service(&id, &service);
+                        let _ignored = self.remove_service(&service);
                     }
                     let _ignored = self.adapter_by_id.remove(&id);
                     return Err(err)
@@ -477,13 +485,13 @@ impl AdapterManagerState {
     /// Returns an error if the adapter does not exist or a service with the same identifier
     /// already exists, or if the identifier introduces a channel that would overwrite another
     /// channel with the same identifier. In either cases, this method reverts all its changes.
-    pub fn add_service(&mut self, adapter: &Id<AdapterId>, service: Service) -> Result<(), AdapterError> {
+    pub fn add_service(&mut self, service: Service) -> Result<(), AdapterError> {
         // Insert all getters of this service in `getters`.
         // Note that they already appear in `gervice`, by construction.
         let mut getters_to_insert = Vec::with_capacity(service.getters.len());
         for (id, getter) in &service.getters {
-            if getter.adapter != *adapter {
-                return Err(AdapterError::ConflictingAdapter(getter.adapter.clone(), adapter.clone()))
+            if getter.adapter != service.adapter {
+                return Err(AdapterError::ConflictingAdapter(getter.adapter.clone(), service.adapter.clone()))
             }
             getters_to_insert.push((id.clone(), GetterData::new(getter.clone())))
         };
@@ -498,8 +506,8 @@ impl AdapterManagerState {
         // Note that they already appear in `service`, by construction.
         let mut setters_to_insert = Vec::with_capacity(service.setters.len());
         for (id, setter) in &service.setters {
-            if setter.adapter != *adapter {
-                return Err(AdapterError::ConflictingAdapter(setter.adapter.clone(), adapter.clone()))
+            if setter.adapter != service.adapter {
+                return Err(AdapterError::ConflictingAdapter(setter.adapter.clone(), service.adapter.clone()))
             }
             setters_to_insert.push((id.clone(), SetterData::new(setter.clone())))
         };
@@ -511,8 +519,8 @@ impl AdapterManagerState {
 
         // Insert in `adapters`.
         let mut services_for_this_adapter =
-            match self.adapter_by_id.get_mut(&adapter) {
-                None => return Err(AdapterError::NoSuchAdapter(adapter.clone())),
+            match self.adapter_by_id.get_mut(&service.adapter) {
+                None => return Err(AdapterError::NoSuchAdapter(service.adapter.clone())),
                 Some(&mut AdapterData {ref mut services, ..}) => {
                     services
                 }
@@ -547,8 +555,8 @@ impl AdapterManagerState {
     /// This method returns an error if the adapter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    pub fn remove_service(&mut self, adapter: &Id<AdapterId>, service_id: &Id<ServiceId>) -> Result<(), AdapterError> {
-        let _ignored = self.aux_remove_service(service_id);
+    pub fn remove_service(&mut self, service_id: &Id<ServiceId>) -> Result<(), AdapterError> {
+        let adapter = try!(self.aux_remove_service(service_id));
         match self.adapter_by_id.get_mut(&adapter) {
             None => Err(AdapterError::NoSuchAdapter(adapter.clone())),
             Some(mut data) => {

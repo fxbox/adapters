@@ -38,7 +38,7 @@ pub trait AdapterManagerHandle {
     /// Returns an error if the adapter does not exist or a service with the same identifier
     /// already exists, or if the identifier introduces a channel that would overwrite another
     /// channel with the same identifier. In either cases, this method reverts all its changes.
-    fn add_service(&self, adapter: &Id<AdapterId>, service: Service) -> Result<(), AdapterError>;
+    fn add_service(&self, service: Service) -> Result<(), AdapterError>;
 
     /// Remove a service previously registered on the system. Typically, called by
     /// an adapter when a service (e.g. a device) is disconnected.
@@ -48,7 +48,7 @@ pub trait AdapterManagerHandle {
     /// This method returns an error if the adapter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_service(&self, adapter: &Id<AdapterId>, service_id: &Id<ServiceId>) -> Result<(), AdapterError>;
+    fn remove_service(&self, service_id: &Id<ServiceId>) -> Result<(), AdapterError>;
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
     /// service has been detected/configured. Some services may gain/lose getters at
