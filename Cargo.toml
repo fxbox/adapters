@@ -5,7 +5,7 @@ authors = ["David Rajchenbach-Teller <dteller@mozilla.com>"]
 
 [dependencies]
 clippy = "*"
-foxbox_taxonomy = { git = "https://github.com/fxbox/taxonomy.git", rev = "20b12d9" }
+foxbox_taxonomy = { git = "https://github.com/fxbox/taxonomy.git", rev = "b817b71" }
 serde = "^0.6"
 serde_json = "^0.6"
 serde_macros = "^0.6"

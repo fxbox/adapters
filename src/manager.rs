@@ -14,14 +14,10 @@ use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::{ Range, Value };
 
 use std::sync::{ Arc, Mutex };
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::{ channel, Sender };
-use std::thread;
 
 /// An implementation of the AdapterManager.
 pub struct AdapterManager {
     back_end: Arc<Mutex<AdapterManagerState>>,
-    tx_watchers: Sender<OpWatcher>,
 }
 
 impl AdapterManager {
@@ -29,45 +25,12 @@ impl AdapterManager {
     /// This function does not attempt to load any state from the disk.
     pub fn new() -> Self {
         let back_end = Arc::new(Mutex::new(AdapterManagerState::new()));
-        let watchers = back_end.lock().unwrap().get_sync_watchmap();
-        let (tx, rx) = channel();
-        thread::spawn(move || {
-            for msg in rx {
-                match msg {
-                    OpWatcher::Stop => return,
-                    OpWatcher::WatchNotification { key, id, value } => {
-                        let (is_dropped, tx) = match watchers.get(key) {
-                            None => continue,
-                            Some((is_dropped, tx)) => (is_dropped, tx)
-                        };
-                        if is_dropped.load(Ordering::Relaxed) {
-                            continue;
-                        }
-                        let event = WatchEvent::Value {
-                            from: id,
-                            value: value,
-                        };
-                        let _ = tx.send(event);
-                    }
-                }
-            }
-        });
-        // Note that this creates a cycle.
-        back_end.lock().unwrap().set_tx_watcher(tx.clone());
         AdapterManager {
             back_end: back_end,
-            tx_watchers: tx,
         }
     }
 }
 
-impl Drop for AdapterManager {
-    fn drop(&mut self) {
-        // Kill the watcher execution thread. This will break the cycle that would otherwise hold
-        // AdapterManagerState alive.
-        let _ = self.tx_watchers.send(OpWatcher::Stop);
-    }
-}
 impl Default for AdapterManager {
     fn default() -> Self {
         Self::new()
@@ -292,7 +255,7 @@ impl API for AdapterManager {
 
     /// Watch for any change
     fn register_channel_watch(&self, selectors: Vec<GetterSelector>, range: Exactly<Range>,
-        on_event: Sender<WatchEvent>) -> Self::WatchGuard
+        on_event: Box<Fn(WatchEvent)>) -> Self::WatchGuard
     {
         let (key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(selectors,
             range, on_event);

@@ -137,7 +137,7 @@ impl Deref for SetterData {
 struct WatcherData {
     selectors: Vec<GetterSelector>,
     range: Exactly<Range>,
-    on_event: Sender<WatchEvent>,
+    on_event: Arc<Box<Fn(WatchEvent)>>,
     key: usize,
     guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
     getters: RefCell<HashSet<Id<Getter>>>,
@@ -145,7 +145,7 @@ struct WatcherData {
 }
 
 impl WatcherData {
-    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Self {
+    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Arc<Box<Fn(WatchEvent)>>) -> Self {
         WatcherData {
             selectors: selectors,
             range: range,
@@ -166,31 +166,6 @@ impl WatcherData {
     }
 }
 
-// A Sync view on a subset of WatchMap.
-pub struct SyncWatchMap {
-    map: Arc<Mutex<WatchMap>>
-}
-unsafe impl Sync for SyncWatchMap {} // FIXME: Double-check this or find a better way
-unsafe impl Send for SyncWatchMap {} // FIXME: Double-check this or find a better way
-
-impl SyncWatchMap {
-    pub fn new(map: Arc<Mutex<WatchMap>>) -> Self {
-        SyncWatchMap {
-            map: map
-        }
-    }
-    pub fn get(&self, key: usize) -> Option<(Arc<AtomicBool>, Sender<WatchEvent>)> {
-        match self.map.lock().unwrap().watchers.get(&key) {
-            None => None,
-            Some(watcher_data) => {
-                // WARNING: watcher_data is not Sync. Only subsets can be considered Sync.
-                Some((watcher_data.is_dropped.clone(), watcher_data.on_event.clone()))
-            }
-        }
-    }
-}
-
-
 pub struct WatchMap {
     /// A counter of all watchers that have been added to the system.
     /// Used to generate unique keys.
@@ -204,7 +179,7 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Arc<WatcherData> {
+    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Arc<Box<Fn(WatchEvent)>>) -> Arc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
         let watcher = Arc::new(WatcherData::new(id, selectors, range, is_dropped, on_event));
@@ -430,11 +405,11 @@ impl AdapterManagerState {
            tx_watchers: None
        }
     }
-
+/*
     pub fn get_sync_watchmap(&self) -> SyncWatchMap {
         SyncWatchMap::new(self.watchers.clone())
     }
-
+*/
     pub fn set_tx_watcher(&mut self, tx: Sender<OpWatcher>) {
         self.tx_watchers = Some(tx);
     }
@@ -839,7 +814,7 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Sender<WatchEvent>) -> (usize, Arc<AtomicBool>) {
+    pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent)>) -> (usize, Arc<AtomicBool>) {
         // Store the watcher. This will serve when we need to decide whether new channels
         // should be registered with this watcher.
         let tx = match self.tx_watchers {
@@ -847,6 +822,7 @@ impl AdapterManagerState {
             Some(ref tx) => tx.clone()
         };
         let is_dropped = Arc::new(AtomicBool::new(false));
+        let on_event = Arc::new(on_event);
         let watcher = self.watchers.lock().unwrap().create(selectors.clone(), range.clone(), &is_dropped, on_event.clone());
         let key = watcher.key;
 
@@ -889,7 +865,7 @@ impl AdapterManagerState {
                         channel: channel_id.clone(),
                         error: err
                     };
-                    let _ = on_event.send(event);
+                    on_event(event);
                 },
                 Ok(guard) => watcher.push_guard(guard)
             }
