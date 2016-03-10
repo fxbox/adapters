@@ -9,7 +9,7 @@ pub trait AdapterWatchGuard {
 }
 
 /// An API that adapter managers must implement
-pub trait AdapterManager {
+pub trait AdapterManagerHandle {
     /// Add an adapter to the system.
     ///
     /// # Errors
@@ -123,5 +123,5 @@ pub trait Adapter: Send {
     /// Request that a value be sent to a channel.
     fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), AdapterError>;
 
-    fn register_watch(&self, id: &Id<Getter>, range: Option<Range>, cb: Box<Fn(Value)>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
+    fn register_watch(&self, id: &Id<Getter>, threshold: Option<Value>, cb: Box<Fn(Value) + Send>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
 }

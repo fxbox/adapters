@@ -837,6 +837,7 @@ impl AdapterManagerState {
         });
 
         for (channel_id, adapter_id) in channels.drain(..) {
+            use foxbox_taxonomy::values::Range::*;
             let adapter = match adapter_by_id.get(&adapter_id) {
                 None => {
                     debug_assert!(false, "We have a registered channel {:?} whose adapter is not registered: {:?}", &channel_id, adapter_id);
@@ -850,24 +851,45 @@ impl AdapterManagerState {
                 Exactly::Always => None,
                 _ => continue // Nothing to watch, we are only interested in topology
             };
-            let id = channel_id.clone();
-            let tx = tx.clone();
-            let cb = move |value| {
-                let _ = tx.send(OpWatcher::WatchNotification {
-                    id: id.clone(),
-                    key: key,
-                    value: value
-                });
+            let thresholds = match range {
+                None => vec![None],
+                Some(Leq(ref value)) | Some(Geq(ref value)) | Some(Eq(ref value)) =>
+                    vec![Some(value.clone())],
+                Some(BetweenEq { ref min, ref max }) | Some(OutOfStrict { ref min, ref max }) =>
+                    vec![Some(min.clone()), Some(max.clone())]
             };
-            match adapter.register_watch(&channel_id.clone(), range, Box::new(cb)) {
-                Err(err) => {
-                    let event = WatchEvent::InitializationError {
-                        channel: channel_id.clone(),
-                        error: err
-                    };
-                    on_event(event);
-                },
-                Ok(guard) => watcher.push_guard(guard)
+
+            for threshold in thresholds {
+                let tx = tx.clone();
+                let id = channel_id.clone();
+                let is_dropped = is_dropped.clone();
+                let range = range.clone();
+                let cb = move |value| {
+                    if is_dropped.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Some(ref range) = range {
+                        if !range.contains(&value) {
+                            return;
+                        }
+                    }
+                    let _ = tx.send(OpWatcher::WatchNotification {
+                        id: id.clone(),
+                        key: key,
+                        value: value
+                    });
+                };
+
+                match adapter.register_watch(&channel_id.clone(), threshold, Box::new(cb)) {
+                    Err(err) => {
+                        let event = WatchEvent::InitializationError {
+                            channel: channel_id.clone(),
+                            error: err
+                        };
+                        on_event(event);
+                    },
+                    Ok(guard) => watcher.push_guard(guard)
+                }
             }
         }
 

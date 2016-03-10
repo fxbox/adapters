@@ -5,7 +5,7 @@
 //! - it exposes an implementation of the taxonomy API.
 
 use backend::*;
-use adapter::{ Adapter, AdapterManager as AdapterManagerHandle };
+use adapter::{ Adapter, AdapterManagerHandle };
 
 use foxbox_taxonomy::api::{ AdapterError, API, Error as APIError, ResultMap, WatchEvent };
 use foxbox_taxonomy::selector::*;
