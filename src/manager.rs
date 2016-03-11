@@ -254,11 +254,11 @@ impl API for AdapterManager {
     }
 
     /// Watch for any change
-    fn register_channel_watch(&self, selectors: Vec<GetterSelector>, range: Exactly<Range>,
+    fn register_channel_watch(&self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
         on_event: Box<Fn(WatchEvent) + Send>) -> Self::WatchGuard
     {
-        let (tx, key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(selectors,
-            range, on_event);
+        let (tx, key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(watch,
+            on_event);
         WatchGuard::new(self.back_end.clone(), tx, key, is_dropped)
     }
 

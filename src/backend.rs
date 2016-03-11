@@ -140,8 +140,7 @@ pub enum OpWatch {
     WatchEvent(WatchEvent)
 }
 struct WatcherData {
-    selectors: Vec<GetterSelector>,
-    range: Exactly<Range>,
+    watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
     on_event: Sender<OpWatch>,
     key: usize,
     guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
@@ -150,12 +149,11 @@ struct WatcherData {
 }
 
 impl WatcherData {
-    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Self {
+    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Self {
         WatcherData {
-            selectors: selectors,
-            range: range,
             key: key,
             on_event: on_event,
+            watch: watch,
             is_dropped: is_dropped.clone(),
             guards: RefCell::new(Vec::new()),
             getters: RefCell::new(HashSet::new()),
@@ -184,10 +182,10 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Arc<WatcherData> {
+    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Arc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
-        let watcher = Arc::new(WatcherData::new(id, selectors, range, is_dropped, on_event));
+        let watcher = Arc::new(WatcherData::new(id, watch, is_dropped, on_event));
         self.watchers.insert(id, watcher.clone());
         watcher
     }
@@ -283,7 +281,8 @@ impl AdapterManagerState {
             return Err(AdapterError::ConflictingAdapter(service.borrow().adapter.clone(), getter_data.adapter.clone()));
         }
 
-        // Check whether we match an ongoing watcher.
+/*
+        // FIXME: Check whether we match an ongoing watcher.
         for watcher in &mut watchers.lock().unwrap().watchers.values() {
             let matches = watcher.selectors.iter().find(|selector| {
                 getter_data.matches(selector)
@@ -295,7 +294,7 @@ impl AdapterManagerState {
                 // FIXME: register_single_channel_watch_values
             };
         }
-
+*/
         let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
             Ok(transaction) => transaction,
             Err(id) => return Err(AdapterError::DuplicateGetter(id))
@@ -812,7 +811,7 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
+    pub fn register_channel_watch(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
         let (tx, rx) = channel();
         thread::spawn(move || {
             for msg in rx {
@@ -828,73 +827,76 @@ impl AdapterManagerState {
         // Store the watcher. This will serve when we new channels are added, to hook them up
         // to this watcher.
         let is_dropped = Arc::new(AtomicBool::new(false));
-        let watcher = self.watchers.lock().unwrap().create(selectors.clone(), range.clone(),
+        let watcher = self.watchers.lock().unwrap().create(watch.clone(),
             &is_dropped, tx.clone());
         let key = watcher.key;
 
-        // Find out which channels already match the selectors and attach
-        // the watcher immediately.
-        let adapter_by_id = &self.adapter_by_id;
-        let mut channels = Vec::new();
-        Self::with_channels_mut(&selectors, &mut self.getter_by_id, |mut getter_data| {
-            getter_data.watchers.insert(watcher.clone());
-            watcher.push_getter(&getter_data.id);
-            channels.push((getter_data.id.clone(), getter_data.adapter.clone()));
-        });
+        for (selectors, range) in watch {
 
-        for (channel_id, adapter_id) in channels.drain(..) {
-            use foxbox_taxonomy::values::Range::*;
-            let adapter = match adapter_by_id.get(&adapter_id) {
-                None => {
-                    debug_assert!(false, "We have a registered channel {:?} whose adapter is not registered: {:?}", &channel_id, adapter_id);
-                    // FIXME: Logging would be nice.
-                    continue
-                },
-                Some(adapter) => adapter
-            };
-            let range = match range {
-                Exactly::Exactly(ref range) => Some(range.clone()),
-                Exactly::Always => None,
-                _ => continue // Nothing to watch, we are only interested in topology
-            };
-            let thresholds = match range {
-                None => vec![None],
-                Some(Leq(ref value)) | Some(Geq(ref value)) | Some(Eq(ref value)) =>
-                    vec![Some(value.clone())],
-                Some(BetweenEq { ref min, ref max }) | Some(OutOfStrict { ref min, ref max }) =>
-                    vec![Some(min.clone()), Some(max.clone())]
-            };
+            // Find out which channels already match the selectors and attach
+            // the watcher immediately.
+            let adapter_by_id = &self.adapter_by_id;
+            let mut channels = Vec::new();
+            Self::with_channels_mut(&selectors, &mut self.getter_by_id, |mut getter_data| {
+                getter_data.watchers.insert(watcher.clone());
+                watcher.push_getter(&getter_data.id);
+                channels.push((getter_data.id.clone(), getter_data.adapter.clone()));
+            });
 
-            for threshold in thresholds {
-                let id = channel_id.clone();
-                let is_dropped = is_dropped.clone();
-                let range = range.clone();
-                let (tx, tx_err) = (tx.clone(), tx.clone());
-                let cb = move |value| {
-                    if is_dropped.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    if let Some(ref range) = range {
-                        if !range.contains(&value) {
-                            return;
-                        }
-                    }
-                    let event = WatchEvent::Value {
-                        value: value,
-                        from: id.clone()
-                    };
-                    let _ = tx.send(OpWatch::WatchEvent(event));
+            for (channel_id, adapter_id) in channels.drain(..) {
+                use foxbox_taxonomy::values::Range::*;
+                let adapter = match adapter_by_id.get(&adapter_id) {
+                    None => {
+                        debug_assert!(false, "We have a registered channel {:?} whose adapter is not registered: {:?}", &channel_id, adapter_id);
+                        // FIXME: Logging would be nice.
+                        continue
+                    },
+                    Some(adapter) => adapter
+                };
+                let range = match range {
+                    Exactly::Exactly(ref range) => Some(range.clone()),
+                    Exactly::Always => None,
+                    _ => continue // Nothing to watch, we are only interested in topology
+                };
+                let thresholds = match range {
+                    None => vec![None],
+                    Some(Leq(ref value)) | Some(Geq(ref value)) | Some(Eq(ref value)) =>
+                        vec![Some(value.clone())],
+                    Some(BetweenEq { ref min, ref max }) | Some(OutOfStrict { ref min, ref max }) =>
+                        vec![Some(min.clone()), Some(max.clone())]
                 };
 
-                match adapter.register_watch(&channel_id.clone(), threshold, Box::new(cb)) {
-                    Err(err) => {
-                        let event = WatchEvent::InitializationError {
-                            channel: channel_id.clone(),
-                            error: err
+                for threshold in thresholds {
+                    let id = channel_id.clone();
+                    let is_dropped = is_dropped.clone();
+                    let range = range.clone();
+                    let (tx, tx_err) = (tx.clone(), tx.clone());
+                    let cb = move |value| {
+                        if is_dropped.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Some(ref range) = range {
+                            if !range.contains(&value) {
+                                return;
+                            }
+                        }
+                        let event = WatchEvent::Value {
+                            value: value,
+                            from: id.clone()
                         };
-                        let _ = tx_err.send(OpWatch::WatchEvent(event));
-                    },
-                    Ok(guard) => watcher.push_guard(guard)
+                        let _ = tx.send(OpWatch::WatchEvent(event));
+                    };
+
+                    match adapter.register_watch(&channel_id.clone(), threshold, Box::new(cb)) {
+                        Err(err) => {
+                            let event = WatchEvent::InitializationError {
+                                channel: channel_id.clone(),
+                                error: err
+                            };
+                            let _ = tx_err.send(OpWatch::WatchEvent(event));
+                        },
+                        Ok(guard) => watcher.push_guard(guard)
+                    }
                 }
             }
         }
