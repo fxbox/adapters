@@ -58,7 +58,10 @@ impl Adapter for TestAdapter {
         unimplemented!()
     }
 
-    fn register_watch(&self, id: &Id<Getter>, threshold: Option<Value>, cb: Box<Fn(Value) + Send>) -> Result<Box<AdapterWatchGuard>, AdapterError> {
+    fn register_watch(&self, sources: Vec<(Id<Getter>, Option<Range>)>,
+        cb: Box<Fn(WatchEvent) + Send>) ->
+            ResultMap<Id<Getter>, Box<AdapterWatchGuard>, AdapterError>
+    {
         unimplemented!()
     }
 }
