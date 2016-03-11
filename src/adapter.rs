@@ -101,6 +101,21 @@ pub trait AdapterManagerHandle {
     fn remove_setter(&self, id: &Id<Setter>) -> Result<(), AdapterError>;
 }
 
+pub enum WatchEvent {
+    /// Fired when we enter the range specified when we started watching, or if no range was
+    /// specified, fired whenever a new value is available.
+    Enter {
+        id: Id<Getter>,
+        value: Value
+    },
+    /// Fired when we exit the range specified when we started watching. If no range was
+    /// specified, never fired.
+    Exit {
+        id: Id<Getter>,
+        value: Value
+    }
+}
+
 /// API that adapters must implement.
 ///
 /// Note that all methods are blocking. However, the underlying implementatino of adapters is
@@ -120,8 +135,11 @@ pub trait Adapter: Send {
     /// is in charge of keeping track of the age of values.
     fn fetch_values(&self, set: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, AdapterError>;
 
-    /// Request that a value be sent to a channel.
+    /// Request that values be sent to a channel.
     fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), AdapterError>;
 
-    fn register_watch(&self, id: &Id<Getter>, threshold: Option<Value>, cb: Box<Fn(Value) + Send>) -> Result<Box<AdapterWatchGuard>, AdapterError>;
+    /// Watch a bunch of getters as they change.
+    fn register_watch(&self, Vec<(Id<Getter>, Option<Range>)>,
+        cb: Box<Fn(WatchEvent) + Send>) ->
+            ResultMap<Id<Getter>, Box<AdapterWatchGuard>, AdapterError>;
 }

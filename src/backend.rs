@@ -1,6 +1,6 @@
 //! An API for plugging in adapters.
 
-use adapter::{ Adapter, AdapterWatchGuard };
+use adapter::{ Adapter, AdapterWatchGuard, WatchEvent as AdapterWatchEvent };
 use transact::InsertInMap;
 
 use foxbox_taxonomy::api::{ AdapterError, API, Error as APIError, WatchEvent, ResultMap };
@@ -811,7 +811,7 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
+    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
         let (tx, rx) = channel();
         thread::spawn(move || {
             for msg in rx {
@@ -831,72 +831,79 @@ impl AdapterManagerState {
             &is_dropped, tx.clone());
         let key = watcher.key;
 
-        for (selectors, range) in watch {
+        // Regroup per adapter.
+        let mut per_adapter = HashMap::new();
 
+        for (selectors, filter) in watch.drain(..) {
             // Find out which channels already match the selectors and attach
             // the watcher immediately.
-            let adapter_by_id = &self.adapter_by_id;
-            let mut channels = Vec::new();
+            let filter = &filter;
             Self::with_channels_mut(&selectors, &mut self.getter_by_id, |mut getter_data| {
+                use std::collections::hash_map::Entry::*;
                 getter_data.watchers.insert(watcher.clone());
                 watcher.push_getter(&getter_data.id);
-                channels.push((getter_data.id.clone(), getter_data.adapter.clone()));
-            });
 
-            for (channel_id, adapter_id) in channels.drain(..) {
-                use foxbox_taxonomy::values::Range::*;
-                let adapter = match adapter_by_id.get(&adapter_id) {
-                    None => {
-                        debug_assert!(false, "We have a registered channel {:?} whose adapter is not registered: {:?}", &channel_id, adapter_id);
-                        // FIXME: Logging would be nice.
-                        continue
-                    },
-                    Some(adapter) => adapter
-                };
-                let range = match range {
+                let range = match *filter {
                     Exactly::Exactly(ref range) => Some(range.clone()),
                     Exactly::Always => None,
-                    _ => continue // Nothing to watch, we are only interested in topology
-                };
-                let thresholds = match range {
-                    None => vec![None],
-                    Some(Leq(ref value)) | Some(Geq(ref value)) | Some(Eq(ref value)) =>
-                        vec![Some(value.clone())],
-                    Some(BetweenEq { ref min, ref max }) | Some(OutOfStrict { ref min, ref max }) =>
-                        vec![Some(min.clone()), Some(max.clone())]
+                    _ => return // Don't watch data, just topology.
                 };
 
-                for threshold in thresholds {
-                    let id = channel_id.clone();
-                    let is_dropped = is_dropped.clone();
-                    let range = range.clone();
-                    let (tx, tx_err) = (tx.clone(), tx.clone());
-                    let cb = move |value| {
-                        if is_dropped.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if let Some(ref range) = range {
-                            if !range.contains(&value) {
-                                return;
-                            }
-                        }
-                        let event = WatchEvent::Value {
-                            value: value,
-                            from: id.clone()
-                        };
-                        let _ = tx.send(OpWatch::WatchEvent(event));
-                    };
+                let data = (getter_data.id.clone(), range);
+                let adapter = getter_data.adapter.clone();
+                match per_adapter.entry(adapter) {
+                    Vacant(entry) => {
+                        entry.insert(vec![data]);
+                    },
+                    Occupied(mut entry) => entry.get_mut().push(data),
+                }
+            });
+        }
 
-                    match adapter.register_watch(&channel_id.clone(), threshold, Box::new(cb)) {
-                        Err(err) => {
-                            let event = WatchEvent::InitializationError {
-                                channel: channel_id.clone(),
-                                error: err
-                            };
-                            let _ = tx_err.send(OpWatch::WatchEvent(event));
+        // Now dispatch to adapters.
+        for (adapter_id, request) in per_adapter.drain() {
+            let adapter = match self.adapter_by_id.get(&adapter_id) {
+                None => {
+                    debug_assert!(false, "We have a registered channel whose adapter is not registered: {:?}", adapter_id);
+                    // FIXME: Logging would be nice.
+                    continue
+                },
+                Some(adapter) => adapter
+            };
+
+            let is_dropped = is_dropped.clone();
+            let tx = tx.clone();
+            let tx_err = tx.clone();
+            let cb = move |event| {
+                if is_dropped.load(Ordering::Relaxed) {
+                    return;
+                }
+                let event = match event {
+                    AdapterWatchEvent::Enter { id, value } =>
+                        WatchEvent::EnterRange {
+                            from: id,
+                            value: value
                         },
-                        Ok(guard) => watcher.push_guard(guard)
-                    }
+                    AdapterWatchEvent::Exit { id, value } =>
+                        WatchEvent::ExitRange {
+                            from: id,
+                            value: value
+                        },
+                };
+                let _ = tx.send(OpWatch::WatchEvent(event));
+            };
+
+            let watcher = watcher.clone();
+            for (id, result) in adapter.register_watch(request, Box::new(cb)) {
+                match result {
+                    Err(err) => {
+                        let event = WatchEvent::InitializationError {
+                            channel: id.clone(),
+                            error: err
+                        };
+                        let _ = tx_err.send(OpWatch::WatchEvent(event));
+                    },
+                    Ok(guard) => watcher.push_guard(guard)
                 }
             }
         }
