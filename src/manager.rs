@@ -169,7 +169,7 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if services
     /// are added after the call, they will not be affected.
-    fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[String]) -> usize {
+    fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().add_service_tags(selectors, tags)
     }
 
@@ -186,7 +186,7 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if services
     /// are added after the call, they will not be affected.
-    fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[String]) -> usize {
+    fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().remove_service_tags(selectors, tags)
     }
 
@@ -211,11 +211,11 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if channels
     /// are added after the call, they will not be affected.
-    fn add_getter_tags(&self, selectors: &[GetterSelector], tags: &[String]) -> usize {
+    fn add_getter_tags(&self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().add_getter_tags(selectors, tags)
 
     }
-    fn add_setter_tags(&self, selectors: &[SetterSelector], tags: &[String]) -> usize {
+    fn add_setter_tags(&self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().add_setter_tags(selectors, tags)
     }
 
@@ -232,10 +232,10 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if channels
     /// are added after the call, they will not be affected.
-    fn remove_getter_tags(&self, selectors: &[GetterSelector], tags: &[String]) -> usize {
+    fn remove_getter_tags(&self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().remove_getter_tags(selectors, tags)
     }
-    fn remove_setter_tags(&self, selectors: &[SetterSelector], tags: &[String]) -> usize {
+    fn remove_setter_tags(&self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
         self.back_end.lock().unwrap().remove_setter_tags(selectors, tags)
     }
 
@@ -255,11 +255,11 @@ impl API for AdapterManager {
 
     /// Watch for any change
     fn register_channel_watch(&self, selectors: Vec<GetterSelector>, range: Exactly<Range>,
-        on_event: Box<Fn(WatchEvent)>) -> Self::WatchGuard
+        on_event: Box<Fn(WatchEvent) + Send>) -> Self::WatchGuard
     {
-        let (key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(selectors,
+        let (tx, key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(selectors,
             range, on_event);
-        WatchGuard::new(self.back_end.clone(), key, is_dropped)
+        WatchGuard::new(self.back_end.clone(), tx, key, is_dropped)
     }
 
     /// A value that causes a disconnection once it is dropped.

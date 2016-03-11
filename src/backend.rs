@@ -17,7 +17,8 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::{ Arc, Mutex };
 use std::sync::atomic::{ AtomicBool, Ordering };
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{ channel, Sender };
+use std::thread;
 
 /// Data and metadata on an adapter.
 struct AdapterData {
@@ -44,17 +45,17 @@ impl Deref for AdapterData {
 }
 
 trait Tagged {
-    fn insert_tags(&mut self, tags: &[String]);
-    fn remove_tags(&mut self, tags: &[String]);
+    fn insert_tags(&mut self, tags: &[Id<TagId>]);
+    fn remove_tags(&mut self, tags: &[Id<TagId>]);
 }
 
 impl<T> Tagged for Channel<T> where T: IOMechanism {
-    fn insert_tags(&mut self, tags: &[String]) {
+    fn insert_tags(&mut self, tags: &[Id<TagId>]) {
         for tag in tags {
             let _ = self.tags.insert(tag.clone());
         }
     }
-    fn remove_tags(&mut self, tags: &[String]) {
+    fn remove_tags(&mut self, tags: &[Id<TagId>]) {
         for tag in tags {
             let _ = self.tags.remove(tag);
         }
@@ -96,10 +97,10 @@ impl Deref for GetterData {
     }
 }
 impl Tagged for GetterData {
-    fn insert_tags(&mut self, tags: &[String]) {
+    fn insert_tags(&mut self, tags: &[Id<TagId>]) {
         self.getter.insert_tags(tags)
     }
-    fn remove_tags(&mut self, tags: &[String]) {
+    fn remove_tags(&mut self, tags: &[Id<TagId>]) {
         self.getter.remove_tags(tags)
     }
 }
@@ -119,10 +120,10 @@ impl SelectedBy<SetterSelector> for SetterData {
     }
 }
 impl Tagged for SetterData {
-    fn insert_tags(&mut self, tags: &[String]) {
+    fn insert_tags(&mut self, tags: &[Id<TagId>]) {
         self.setter.insert_tags(tags)
     }
-    fn remove_tags(&mut self, tags: &[String]) {
+    fn remove_tags(&mut self, tags: &[Id<TagId>]) {
         self.setter.remove_tags(tags)
     }
 }
@@ -134,10 +135,14 @@ impl Deref for SetterData {
 }
 
 
+pub enum OpWatch {
+    Stop,
+    WatchEvent(WatchEvent)
+}
 struct WatcherData {
     selectors: Vec<GetterSelector>,
     range: Exactly<Range>,
-    on_event: Arc<Box<Fn(WatchEvent)>>,
+    on_event: Sender<OpWatch>,
     key: usize,
     guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
     getters: RefCell<HashSet<Id<Getter>>>,
@@ -145,7 +150,7 @@ struct WatcherData {
 }
 
 impl WatcherData {
-    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Arc<Box<Fn(WatchEvent)>>) -> Self {
+    fn new(key: usize, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Self {
         WatcherData {
             selectors: selectors,
             range: range,
@@ -179,7 +184,7 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Arc<Box<Fn(WatchEvent)>>) -> Arc<WatcherData> {
+    fn create(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Arc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
         let watcher = Arc::new(WatcherData::new(id, selectors, range, is_dropped, on_event));
@@ -205,15 +210,19 @@ pub struct WatchGuard {
     /// The cancellation key.
     key: usize,
 
+    /// A channel controlling the dedicated watcher thread.
+    tx: Sender<OpWatch>,
+
     /// Once dropped, the watch callbacks will stopped being called. Note
     /// that dropping this value is not sufficient to cancel the watch, as
     /// the adapters will continue sending updates.
     is_dropped: Arc<AtomicBool>,
 }
 impl WatchGuard {
-    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Sender<OpWatch>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
         WatchGuard {
             owner: owner,
+            tx: tx,
             key: key,
             is_dropped: is_dropped
         }
@@ -222,18 +231,11 @@ impl WatchGuard {
 impl Drop for WatchGuard {
     fn drop(&mut self) {
         self.is_dropped.store(true, Ordering::Relaxed);
+        let _ = self.tx.send(OpWatch::Stop);
         self.owner.lock().unwrap().unregister_channel_watch(self.key)
     }
 }
 
-pub enum OpWatcher {
-    Stop,
-    WatchNotification {
-        id: Id<Getter>,
-        key: usize,
-        value: Value
-    }
-}
 pub struct AdapterManagerState {
     /// Adapters, indexed by their id.
     adapter_by_id: HashMap<Id<AdapterId>, AdapterData>,
@@ -250,8 +252,6 @@ pub struct AdapterManagerState {
     /// The set of watchers registered. Used both when we add/remove channels
     /// and a when a new value is available from a getter channel.
     watchers: Arc<Mutex<WatchMap>>,
-
-    tx_watchers: Option<Sender<OpWatcher>>
 }
 
 impl AdapterManagerState {
@@ -357,7 +357,7 @@ impl AdapterManagerState {
         result
     }
 
-    fn aux_add_channel_tags<S, K, V>(selectors: &[S], tags: &[String], map: &mut HashMap<Id<K>, V>) -> usize
+    fn aux_add_channel_tags<S, K, V>(selectors: &[S], tags: &[Id<TagId>], map: &mut HashMap<Id<K>, V>) -> usize
         where V: SelectedBy<S> + Tagged
     {
         let mut result = 0;
@@ -368,7 +368,7 @@ impl AdapterManagerState {
         result
     }
 
-    fn aux_remove_channel_tags<S, K, V>(selectors: &[S], tags: &[String], map: &mut HashMap<Id<K>, V>) -> usize
+    fn aux_remove_channel_tags<S, K, V>(selectors: &[S], tags: &[Id<TagId>], map: &mut HashMap<Id<K>, V>) -> usize
         where V: SelectedBy<S> + Tagged
     {
         let mut result = 0;
@@ -396,7 +396,6 @@ impl AdapterManagerState {
 
 }
 
-#[allow(new_without_default)]
 impl AdapterManagerState {
     pub fn new() -> Self {
         AdapterManagerState {
@@ -405,16 +404,7 @@ impl AdapterManagerState {
            getter_by_id: HashMap::new(),
            setter_by_id: HashMap::new(),
            watchers: Arc::new(Mutex::new(WatchMap::new())),
-           tx_watchers: None
        }
-    }
-/*
-    pub fn get_sync_watchmap(&self) -> SyncWatchMap {
-        SyncWatchMap::new(self.watchers.clone())
-    }
-*/
-    pub fn set_tx_watcher(&mut self, tx: Sender<OpWatcher>) {
-        self.tx_watchers = Some(tx);
     }
 
     /// Add an adapter to the system.
@@ -698,7 +688,7 @@ impl AdapterManagerState {
         result
     }
 
-    pub fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[String]) -> usize {
+    pub fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
             let tag_set = &mut service.borrow_mut().tags;
@@ -710,7 +700,7 @@ impl AdapterManagerState {
         result
     }
 
-    pub fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[String]) -> usize {
+    pub fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
             let tag_set = &mut service.borrow_mut().tags;
@@ -732,16 +722,16 @@ impl AdapterManagerState {
     }
 
 
-    pub fn add_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[String]) -> usize {
+    pub fn add_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
         Self::aux_add_channel_tags(selectors, tags, &mut self.getter_by_id)
     }
-    pub fn add_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[String]) -> usize {
+    pub fn add_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
         Self::aux_add_channel_tags(selectors, tags, &mut self.setter_by_id)
     }
-    pub fn remove_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[String]) -> usize {
+    pub fn remove_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
         Self::aux_remove_channel_tags(selectors, tags, &mut self.getter_by_id)
     }
-    pub fn remove_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[String]) -> usize {
+    pub fn remove_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
         Self::aux_remove_channel_tags(selectors, tags, &mut self.setter_by_id)
     }
 
@@ -822,16 +812,24 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent)>) -> (usize, Arc<AtomicBool>) {
-        // Store the watcher. This will serve when we need to decide whether new channels
-        // should be registered with this watcher.
-        let tx = match self.tx_watchers {
-            None => panic!("Internal inconsistency. tx_watchers should be set during construction."),
-            Some(ref tx) => tx.clone()
-        };
+    pub fn register_channel_watch(&mut self, selectors: Vec<GetterSelector>, range: Exactly<Range>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            for msg in rx {
+                use self::OpWatch::*;
+                match msg {
+                    Stop => return,
+                    WatchEvent(event) => {
+                        on_event(event)
+                    }
+                }
+            }
+        });
+        // Store the watcher. This will serve when we new channels are added, to hook them up
+        // to this watcher.
         let is_dropped = Arc::new(AtomicBool::new(false));
-        let on_event = Arc::new(on_event);
-        let watcher = self.watchers.lock().unwrap().create(selectors.clone(), range.clone(), &is_dropped, on_event.clone());
+        let watcher = self.watchers.lock().unwrap().create(selectors.clone(), range.clone(),
+            &is_dropped, tx.clone());
         let key = watcher.key;
 
         // Find out which channels already match the selectors and attach
@@ -868,10 +866,10 @@ impl AdapterManagerState {
             };
 
             for threshold in thresholds {
-                let tx = tx.clone();
                 let id = channel_id.clone();
                 let is_dropped = is_dropped.clone();
                 let range = range.clone();
+                let (tx, tx_err) = (tx.clone(), tx.clone());
                 let cb = move |value| {
                     if is_dropped.load(Ordering::Relaxed) {
                         return;
@@ -881,11 +879,11 @@ impl AdapterManagerState {
                             return;
                         }
                     }
-                    let _ = tx.send(OpWatcher::WatchNotification {
-                        id: id.clone(),
-                        key: key,
-                        value: value
-                    });
+                    let event = WatchEvent::Value {
+                        value: value,
+                        from: id.clone()
+                    };
+                    let _ = tx.send(OpWatch::WatchEvent(event));
                 };
 
                 match adapter.register_watch(&channel_id.clone(), threshold, Box::new(cb)) {
@@ -894,7 +892,7 @@ impl AdapterManagerState {
                             channel: channel_id.clone(),
                             error: err
                         };
-                        on_event(event);
+                        let _ = tx_err.send(OpWatch::WatchEvent(event));
                     },
                     Ok(guard) => watcher.push_guard(guard)
                 }
@@ -903,7 +901,7 @@ impl AdapterManagerState {
 
         // Upon drop, this data structure will immediately drop `is_dropped` and then dispatch
         // `unregister_channel_watch` to unregister everything else.
-        (key, is_dropped)
+        (tx, key, is_dropped)
     }
 
     /// Unregister a watch previously registered with `register_channel_watch`.
