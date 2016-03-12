@@ -3,7 +3,7 @@
 use adapter::{ Adapter, AdapterWatchGuard, WatchEvent as AdapterWatchEvent };
 use transact::InsertInMap;
 
-use foxbox_taxonomy::api::{ AdapterError, API, Error as APIError, WatchEvent, ResultMap };
+use foxbox_taxonomy::api::{ API, Error, InternalError, WatchEvent, ResultMap };
 use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
@@ -135,13 +135,9 @@ impl Deref for SetterData {
 }
 
 
-pub enum OpWatch {
-    Stop,
-    WatchEvent(WatchEvent)
-}
 struct WatcherData {
     watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
-    on_event: Sender<OpWatch>,
+    on_event: Sender<WatchEvent>,
     key: usize,
     guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
     getters: RefCell<HashSet<Id<Getter>>>,
@@ -149,7 +145,7 @@ struct WatcherData {
 }
 
 impl WatcherData {
-    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Self {
+    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Self {
         WatcherData {
             key: key,
             on_event: on_event,
@@ -182,7 +178,7 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<OpWatch>) -> Arc<WatcherData> {
+    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Arc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
         let watcher = Arc::new(WatcherData::new(id, watch, is_dropped, on_event));
@@ -209,7 +205,7 @@ pub struct WatchGuard {
     key: usize,
 
     /// A channel controlling the dedicated watcher thread.
-    tx: Sender<OpWatch>,
+    tx: Sender<WatchEvent>,
 
     /// Once dropped, the watch callbacks will stopped being called. Note
     /// that dropping this value is not sufficient to cancel the watch, as
@@ -217,7 +213,7 @@ pub struct WatchGuard {
     is_dropped: Arc<AtomicBool>,
 }
 impl WatchGuard {
-    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Sender<OpWatch>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Sender<WatchEvent>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
         WatchGuard {
             owner: owner,
             tx: tx,
@@ -229,7 +225,6 @@ impl WatchGuard {
 impl Drop for WatchGuard {
     fn drop(&mut self) {
         self.is_dropped.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(OpWatch::Stop);
         self.owner.lock().unwrap().unregister_channel_watch(self.key)
     }
 }
@@ -255,9 +250,9 @@ pub struct AdapterManagerState {
 impl AdapterManagerState {
     /// Auxiliary function to remove a service, once the mutex has been acquired.
     /// Clients should rather use AdapterManager::remove_service.
-    fn aux_remove_service(&mut self, id: &Id<ServiceId>) -> Result<Id<AdapterId>, AdapterError> {
+    fn aux_remove_service(&mut self, id: &Id<ServiceId>) -> Result<Id<AdapterId>, Error> {
         let (adapter, service) = match self.service_by_id.remove(&id) {
-            None => return Err(AdapterError::NoSuchService(id.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchService(id.clone()))),
             Some(service) => {
                 let adapter = service.borrow().adapter.clone();
                 (adapter, service)
@@ -270,36 +265,6 @@ impl AdapterManagerState {
             let _ignored = self.setter_by_id.remove(id);
         }
         Ok(adapter)
-    }
-
-    fn aux_add_getter<'a, 'b>(mut getter_data: GetterData, service: &Rc<RefCell<Service>>,
-        getter_by_id: &'b mut HashMap<Id<Getter>, GetterData>,
-        watchers: &mut Arc<Mutex<WatchMap>>) -> Result<InsertInMap<'a, Id<Getter>, GetterData>, AdapterError>
-        where 'b: 'a
-    {
-        if service.borrow().adapter != getter_data.adapter {
-            return Err(AdapterError::ConflictingAdapter(service.borrow().adapter.clone(), getter_data.adapter.clone()));
-        }
-
-/*
-        // FIXME: Check whether we match an ongoing watcher.
-        for watcher in &mut watchers.lock().unwrap().watchers.values() {
-            let matches = watcher.selectors.iter().find(|selector| {
-                getter_data.matches(selector)
-            }).is_some();
-            if matches {
-                getter_data.watchers.insert(watcher.clone());
-                watcher.push_getter(&getter_data.id);
-                // FIXME: Notify WatchEvent of topology change
-                // FIXME: register_single_channel_watch_values
-            };
-        }
-*/
-        let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
-            Ok(transaction) => transaction,
-            Err(id) => return Err(AdapterError::DuplicateGetter(id))
-        };
-        Ok(insert_in_getters)
     }
 
     fn with_services<F>(&self, selectors: &[ServiceSelector], mut cb: F) where F: FnMut(&Rc<RefCell<Service>>) {
@@ -411,32 +376,11 @@ impl AdapterManagerState {
     /// # Errors
     ///
     /// Returns an error if an adapter with the same id is already present.
-    pub fn add_adapter(&mut self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError> {
-        let id = adapter.id();
-        for service in &services {
-            if service.adapter != id {
-                return Err(AdapterError::ConflictingAdapter(service.adapter.clone(), id))
-            }
-        }
-        match self.adapter_by_id.entry(id.clone()) {
-            Entry::Occupied(_) => return Err(AdapterError::DuplicateAdapter(id)),
+    pub fn add_adapter(&mut self, adapter: Box<Adapter>) -> Result<(), Error> {
+        match self.adapter_by_id.entry(adapter.id()) {
+            Entry::Occupied(_) => return Err(Error::InternalError(InternalError::DuplicateAdapter(adapter.id()))),
             Entry::Vacant(entry) => {
                 entry.insert(AdapterData::new(adapter));
-            }
-        }
-        let mut added = Vec::with_capacity(services.len());
-        for service in services {
-            let service_id = service.id.clone();
-            match self.add_service(service) {
-                Ok(_) => added.push(service_id),
-                Err(err) => {
-                    // Rollback everything
-                    for service in added {
-                        let _ignored = self.remove_service(&service);
-                    }
-                    let _ignored = self.adapter_by_id.remove(&id);
-                    return Err(err)
-                }
             }
         }
         Ok(())
@@ -449,12 +393,12 @@ impl AdapterManagerState {
     /// Returns an error if no adapter with this identifier exists. Otherwise, attempts
     /// to cleanup as much as possible, even if for some reason the system is in an
     /// inconsistent state.
-    pub fn remove_adapter(&mut self, id: &Id<AdapterId>) -> Result<(), AdapterError> {
+    pub fn remove_adapter(&mut self, id: &Id<AdapterId>) -> Result<(), Error> {
         let mut services = match self.adapter_by_id.remove(id) {
             Some(AdapterData {services: adapter_services, ..}) => {
                 adapter_services
             }
-            None => return Err(AdapterError::NoSuchAdapter(id.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchAdapter(id.clone()))),
         };
         for (service_id, _) in services.drain() {
             let _ignored = self.aux_remove_service(&service_id);
@@ -465,51 +409,27 @@ impl AdapterManagerState {
     /// Add a service to the system. Called by the adapter when a new
     /// service (typically a new device) has been detected/configured.
     ///
+    /// The `service` must NOT have any channels yet. Channels must be added through
+    /// `add_channel`.
+    ///
     /// # Requirements
     ///
     /// The adapter is in charge of making sure that identifiers persist across reboots.
     ///
     /// # Errors
     ///
-    /// Returns an error if the adapter does not exist or a service with the same identifier
-    /// already exists, or if the identifier introduces a channel that would overwrite another
-    /// channel with the same identifier. In either cases, this method reverts all its changes.
-    pub fn add_service(&mut self, service: Service) -> Result<(), AdapterError> {
-        // Insert all getters of this service in `getters`.
-        // Note that they already appear in `gervice`, by construction.
-        let mut getters_to_insert = Vec::with_capacity(service.getters.len());
-        for (id, getter) in &service.getters {
-            if getter.adapter != service.adapter {
-                return Err(AdapterError::ConflictingAdapter(getter.adapter.clone(), service.adapter.clone()))
-            }
-            getters_to_insert.push((id.clone(), GetterData::new(getter.clone())))
-        };
-        let insert_getters =
-            match InsertInMap::start(&mut self.getter_by_id, getters_to_insert) {
-                Err(k) => return Err(AdapterError::DuplicateGetter(k)),
-                Ok(transaction) => transaction
-            };
-        // FIXME: Check if one of the getters needs to be watched.
-
-        // Insert all setters of this service in `setters`.
-        // Note that they already appear in `service`, by construction.
-        let mut setters_to_insert = Vec::with_capacity(service.setters.len());
-        for (id, setter) in &service.setters {
-            if setter.adapter != service.adapter {
-                return Err(AdapterError::ConflictingAdapter(setter.adapter.clone(), service.adapter.clone()))
-            }
-            setters_to_insert.push((id.clone(), SetterData::new(setter.clone())))
-        };
-        let insert_setters =
-            match InsertInMap::start(&mut self.setter_by_id, setters_to_insert) {
-                Err(k) => return Err(AdapterError::DuplicateSetter(k)),
-                Ok(transaction) => transaction
-            };
-
-        // Insert in `adapters`.
+    /// Returns an error if any of:
+    /// - `service` has channels;
+    /// - a service with id `service.id` is already installed on the system;
+    /// - there is no adapter with id `service.adapter`.
+    pub fn add_service(&mut self, service: Service) -> Result<(), Error> {
+        // Make sure that there are no channels.
+        if !service.getters.is_empty() || !service.setters.is_empty() {
+            return Err(Error::InternalError(InternalError::InvalidInitialService));
+        }
         let mut services_for_this_adapter =
             match self.adapter_by_id.get_mut(&service.adapter) {
-                None => return Err(AdapterError::NoSuchAdapter(service.adapter.clone())),
+                None => return Err(Error::InternalError(InternalError::NoSuchAdapter(service.adapter.clone()))),
                 Some(&mut AdapterData {ref mut services, ..}) => {
                     services
                 }
@@ -518,20 +438,18 @@ impl AdapterManagerState {
         let service = Rc::new(RefCell::new(service));
         let insert_in_adapters =
             match InsertInMap::start(&mut services_for_this_adapter, vec![(id.clone(), service.clone())]) {
-                Err(k) => return Err(AdapterError::DuplicateService(k)),
+                Err(k) => return Err(Error::InternalError(InternalError::DuplicateService(k))),
                 Ok(transaction) => transaction
             };
 
         let insert_in_services =
             match InsertInMap::start(&mut self.service_by_id, vec![(id.clone(), service)]) {
-                Err(k) => return Err(AdapterError::DuplicateService(k)),
+                Err(k) => return Err(Error::InternalError(InternalError::DuplicateService(k))),
                 Ok(transaction) => transaction
             };
 
         // If we haven't bailed out yet, leave all this stuff in the maps and sets.
         insert_in_adapters.commit();
-        insert_getters.commit();
-        insert_setters.commit();
         insert_in_services.commit();
         Ok(())
     }
@@ -539,18 +457,19 @@ impl AdapterManagerState {
     /// Remove a service previously registered on the system. Typically, called by
     /// an adapter when a service (e.g. a device) is disconnected.
     ///
-    /// # AdapterError
+    /// # Errors
     ///
-    /// This method returns an error if the adapter is not registered or if the service
-    /// is not registered. In either case, it attemps to clean as much as possible, even
-    /// if the state is inconsistent.
-    pub fn remove_service(&mut self, service_id: &Id<ServiceId>) -> Result<(), AdapterError> {
+    /// Returns an error if any of:
+    /// - there is no such service;
+    /// - there is an internal inconsistency, in which case this method will still attempt to
+    /// cleanup before returning an error.
+    pub fn remove_service(&mut self, service_id: &Id<ServiceId>) -> Result<(), Error> {
         let adapter = try!(self.aux_remove_service(service_id));
         match self.adapter_by_id.get_mut(&adapter) {
-            None => Err(AdapterError::NoSuchAdapter(adapter.clone())),
+            None => Err(Error::InternalError(InternalError::NoSuchAdapter(adapter.clone()))),
             Some(mut data) => {
                 if data.services.remove(&service_id).is_none() {
-                    Err(AdapterError::NoSuchService(service_id.clone()))
+                    Err(Error::InternalError(InternalError::NoSuchService(service_id.clone())))
                 } else {
                     Ok(())
                 }
@@ -571,21 +490,41 @@ impl AdapterManagerState {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    pub fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), AdapterError> {
-        let watchers = &mut self.watchers;
+    pub fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), Error> {
         let getter_by_id = &mut self.getter_by_id;
         let service = match self.service_by_id.get_mut(&getter.service) {
-            None => return Err(AdapterError::NoSuchService(getter.service.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchService(getter.service.clone()))),
             Some(service) => service
         };
+        if service.borrow().adapter != getter.adapter {
+            return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), getter.adapter.clone())));
+        }
         let getters = &mut service.borrow_mut().getters;
 
         let insert_in_service = match InsertInMap::start(getters, vec![(getter.id.clone(), getter.clone())]) {
             Ok(transaction) => transaction,
-            Err(id) => return Err(AdapterError::DuplicateGetter(id))
+            Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
         };
 
-        let insert_in_getters = try!(Self::aux_add_getter(GetterData::new(getter), service, getter_by_id, watchers));
+        /*
+                // FIXME: Check whether we match an ongoing watcher.
+                for watcher in &mut watchers.lock().unwrap().watchers.values() {
+                    let matches = watcher.selectors.iter().find(|selector| {
+                        getter_data.matches(selector)
+                    }).is_some();
+                    if matches {
+                        getter_data.watchers.insert(watcher.clone());
+                        watcher.push_getter(&getter_data.id);
+                        // FIXME: Notify WatchEvent of topology change
+                        // FIXME: register_single_channel_watch_values
+                    };
+                }
+        */
+        let getter_data = GetterData::new(getter);
+        let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
+            Ok(transaction) => transaction,
+            Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
+        };
 
         insert_in_service.commit();
         insert_in_getters.commit();
@@ -595,21 +534,21 @@ impl AdapterManagerState {
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its setters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    pub fn remove_getter(&mut self, id: &Id<Getter>) -> Result<(), AdapterError> {
+    pub fn remove_getter(&mut self, id: &Id<Getter>) -> Result<(), Error> {
         let getter = match self.getter_by_id.remove(id) {
-            None => return Err(AdapterError::NoSuchGetter(id.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchGetter(id.clone()))),
             Some(getter) => getter
         };
         match self.service_by_id.get_mut(&getter.getter.service) {
-            None => Err(AdapterError::NoSuchService(getter.getter.service)),
+            None => Err(Error::InternalError(InternalError::NoSuchService(getter.getter.service))),
             Some(service) => {
                 if service.borrow_mut().getters.remove(&id).is_none() {
-                    Err(AdapterError::NoSuchGetter(id.clone()))
+                    Err(Error::InternalError(InternalError::NoSuchGetter(id.clone())))
                 } else {
                     Ok(())
                 }
@@ -630,22 +569,22 @@ impl AdapterManagerState {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    pub fn add_setter(&mut self, setter: Channel<Setter>) -> Result<(), AdapterError> {
+    pub fn add_setter(&mut self, setter: Channel<Setter>) -> Result<(), Error> {
         let service = match self.service_by_id.get_mut(&setter.service) {
-            None => return Err(AdapterError::NoSuchService(setter.service.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchService(setter.service.clone()))),
             Some(service) => service
         };
         if service.borrow().adapter != setter.adapter {
-            return Err(AdapterError::ConflictingAdapter(service.borrow().adapter.clone(), setter.adapter));
+            return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), setter.adapter)));
         }
         let setters = &mut service.borrow_mut().setters;
         let insert_in_service = match InsertInMap::start(setters, vec![(setter.id.clone(), setter.clone())]) {
             Ok(transaction) => transaction,
-            Err(id) => return Err(AdapterError::DuplicateSetter(id))
+            Err(id) => return Err(Error::InternalError(InternalError::DuplicateSetter(id)))
         };
         let insert_in_setters = match InsertInMap::start(&mut self.setter_by_id, vec![(setter.id.clone(), SetterData::new(setter))]) {
             Ok(transaction) => transaction,
-            Err(id) => return Err(AdapterError::DuplicateSetter(id))
+            Err(id) => return Err(Error::InternalError(InternalError::DuplicateSetter(id)))
         };
         insert_in_service.commit();
         insert_in_setters.commit();
@@ -655,21 +594,21 @@ impl AdapterManagerState {
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its setters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    pub fn remove_setter(&mut self, id: &Id<Setter>) -> Result<(), AdapterError> {
+    pub fn remove_setter(&mut self, id: &Id<Setter>) -> Result<(), Error> {
         let setter = match self.setter_by_id.remove(id) {
-            None => return Err(AdapterError::NoSuchSetter(id.clone())),
+            None => return Err(Error::InternalError(InternalError::NoSuchSetter(id.clone()))),
             Some(setter) => setter
         };
         match self.service_by_id.get_mut(&setter.setter.service) {
-            None => Err(AdapterError::NoSuchService(setter.setter.service)),
+            None => Err(Error::InternalError(InternalError::NoSuchService(setter.setter.service))),
             Some(service) => {
                 if service.borrow_mut().setters.remove(id).is_none() {
-                    Err(AdapterError::NoSuchSetter(id.clone()))
+                    Err(Error::InternalError(InternalError::NoSuchSetter(id.clone())))
                 } else {
                     Ok(())
                 }
@@ -735,7 +674,7 @@ impl AdapterManagerState {
     }
 
     /// Read the latest value from a set of channels
-    pub fn fetch_values(&mut self, selectors: &[GetterSelector]) -> ResultSet<Id<Getter>, Option<Value>, APIError> {
+    pub fn fetch_values(&mut self, selectors: &[GetterSelector]) -> ResultSet<Id<Getter>, Option<Value>, Error> {
         // First group per adapter, so as to let adapters optimize fetches.
         let mut per_adapter = HashMap::new();
         Self::with_channels(selectors, &self.getter_by_id, |data| {
@@ -760,11 +699,6 @@ impl AdapterManagerState {
                         .adapter
                         .fetch_values(getters);
 
-                    let mut got = got.drain(..)
-                        .map(|(id, result)| {
-                            (id, result.map_err(APIError::AdapterError))
-                        })
-                        .collect();
                     results.append(&mut got);
                 }
             }
@@ -773,7 +707,7 @@ impl AdapterManagerState {
     }
 
     /// Send values to a set of channels
-    pub fn send_values(&self, mut keyvalues: Vec<(Vec<SetterSelector>, Value)>) -> ResultMap<Id<Setter>, (), APIError> {
+    pub fn send_values(&self, mut keyvalues: Vec<(Vec<SetterSelector>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
         // First determine the channels and group them by adapter.
         let mut per_adapter = HashMap::new();
         for (selectors, value) in keyvalues.drain(..) {
@@ -799,11 +733,6 @@ impl AdapterManagerState {
                 Some(adapter) => adapter
             };
             let mut got = adapter.adapter.send_values(payload);
-            let mut got = got.drain(..)
-                .map(|(id, result)| {
-                    (id, result.map_err(APIError::AdapterError))
-                })
-                .collect();
             results.append(&mut got);
         }
 
@@ -811,17 +740,12 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<OpWatch>, usize, Arc<AtomicBool>) {
+    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<WatchEvent>, usize, Arc<AtomicBool>) {
         let (tx, rx) = channel();
         thread::spawn(move || {
+            // This thread will be destroyed when we drop `tx`, i.e. when we drop `watcher`
             for msg in rx {
-                use self::OpWatch::*;
-                match msg {
-                    Stop => return,
-                    WatchEvent(event) => {
-                        on_event(event)
-                    }
-                }
+                on_event(msg)
             }
         });
         // Store the watcher. This will serve when we new channels are added, to hook them up
@@ -890,7 +814,7 @@ impl AdapterManagerState {
                             value: value
                         },
                 };
-                let _ = tx.send(OpWatch::WatchEvent(event));
+                let _ = tx.send(event);
             };
 
             let watcher = watcher.clone();
@@ -901,7 +825,7 @@ impl AdapterManagerState {
                             channel: id.clone(),
                             error: err
                         };
-                        let _ = tx_err.send(OpWatch::WatchEvent(event));
+                        let _ = tx_err.send(event);
                     },
                     Ok(guard) => watcher.push_guard(guard)
                 }

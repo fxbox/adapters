@@ -1,4 +1,4 @@
-use foxbox_taxonomy::api::{ AdapterError, ResultMap };
+use foxbox_taxonomy::api::{ Error, ResultMap };
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
@@ -15,7 +15,7 @@ pub trait AdapterManagerHandle {
     /// # Errors
     ///
     /// Returns an error if an adapter with the same id is already present.
-    fn add_adapter(&self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError>;
+    fn add_adapter(&self, adapter: Box<Adapter>) -> Result<(), Error>;
 
     /// Remove an adapter from the system, including all its services and channels.
     ///
@@ -24,7 +24,7 @@ pub trait AdapterManagerHandle {
     /// Returns an error if no adapter with this identifier exists. Otherwise, attempts
     /// to cleanup as much as possible, even if for some reason the system is in an
     /// inconsistent state.
-    fn remove_adapter(&self, id: &Id<AdapterId>) -> Result<(), AdapterError>;
+    fn remove_adapter(&self, id: &Id<AdapterId>) -> Result<(), Error>;
 
     /// Add a service to the system. Called by the adapter when a new
     /// service (typically a new device) has been detected/configured.
@@ -35,20 +35,22 @@ pub trait AdapterManagerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the adapter does not exist or a service with the same identifier
-    /// already exists, or if the identifier introduces a channel that would overwrite another
-    /// channel with the same identifier. In either cases, this method reverts all its changes.
-    fn add_service(&self, service: Service) -> Result<(), AdapterError>;
+    /// Returns an error if any of:
+    /// - `service` has channels;
+    /// - a service with id `service.id` is already installed on the system;
+    /// - there is no adapter with id `service.adapter`.
+    fn add_service(&self, service: Service) -> Result<(), Error>;
 
     /// Remove a service previously registered on the system. Typically, called by
     /// an adapter when a service (e.g. a device) is disconnected.
     ///
-    /// # AdapterError
+    /// # Errors
     ///
-    /// This method returns an error if the adapter is not registered or if the service
-    /// is not registered. In either case, it attemps to clean as much as possible, even
-    /// if the state is inconsistent.
-    fn remove_service(&self, service_id: &Id<ServiceId>) -> Result<(), AdapterError>;
+    /// Returns an error if any of:
+    /// - there is no such service;
+    /// - there is an internal inconsistency, in which case this method will still attempt to
+    /// cleanup before returning an error.
+    fn remove_service(&self, service_id: &Id<ServiceId>) -> Result<(), Error>;
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
     /// service has been detected/configured. Some services may gain/lose getters at
@@ -63,17 +65,17 @@ pub trait AdapterManagerHandle {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    fn add_getter(&self, setter: Channel<Getter>) -> Result<(), AdapterError>;
+    fn add_getter(&self, setter: Channel<Getter>) -> Result<(), Error>;
 
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its getters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_getter(&self, id: &Id<Getter>) -> Result<(), AdapterError>;
+    fn remove_getter(&self, id: &Id<Getter>) -> Result<(), Error>;
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
     /// service has been detected/configured. Some services may gain/lose setters at
@@ -88,17 +90,17 @@ pub trait AdapterManagerHandle {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    fn add_setter(&self, setter: Channel<Setter>) -> Result<(), AdapterError>;
+    fn add_setter(&self, setter: Channel<Setter>) -> Result<(), Error>;
 
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its setters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_setter(&self, id: &Id<Setter>) -> Result<(), AdapterError>;
+    fn remove_setter(&self, id: &Id<Setter>) -> Result<(), Error>;
 }
 
 pub enum WatchEvent {
@@ -133,13 +135,13 @@ pub trait Adapter: Send {
 
     /// Request a value from a channel. The FoxBox (not the adapter)
     /// is in charge of keeping track of the age of values.
-    fn fetch_values(&self, set: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, AdapterError>;
+    fn fetch_values(&self, set: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, Error>;
 
     /// Request that values be sent to a channel.
-    fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), AdapterError>;
+    fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error>;
 
     /// Watch a bunch of getters as they change.
     fn register_watch(&self, Vec<(Id<Getter>, Option<Range>)>,
         cb: Box<Fn(WatchEvent) + Send>) ->
-            ResultMap<Id<Getter>, Box<AdapterWatchGuard>, AdapterError>;
+            ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>;
 }

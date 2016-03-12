@@ -7,7 +7,7 @@
 use backend::*;
 use adapter::{ Adapter, AdapterManagerHandle };
 
-use foxbox_taxonomy::api::{ AdapterError, API, Error as APIError, ResultMap, WatchEvent };
+use foxbox_taxonomy::api::{ API, Error, ResultMap, WatchEvent };
 use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
@@ -43,8 +43,8 @@ impl AdapterManagerHandle for AdapterManager {
     /// # Errors
     ///
     /// Returns an error if an adapter with the same id is already present.
-    fn add_adapter(&self, adapter: Box<Adapter>, services: Vec<Service>) -> Result<(), AdapterError> {
-        self.back_end.lock().unwrap().add_adapter(adapter, services)
+    fn add_adapter(&self, adapter: Box<Adapter>) -> Result<(), Error> {
+        self.back_end.lock().unwrap().add_adapter(adapter)
     }
 
     /// Remove an adapter from the system, including all its services and channels.
@@ -54,12 +54,15 @@ impl AdapterManagerHandle for AdapterManager {
     /// Returns an error if no adapter with this identifier exists. Otherwise, attempts
     /// to cleanup as much as possible, even if for some reason the system is in an
     /// inconsistent state.
-    fn remove_adapter(&self, id: &Id<AdapterId>) -> Result<(), AdapterError> {
+    fn remove_adapter(&self, id: &Id<AdapterId>) -> Result<(), Error> {
         self.back_end.lock().unwrap().remove_adapter(id)
     }
 
     /// Add a service to the system. Called by the adapter when a new
     /// service (typically a new device) has been detected/configured.
+    ///
+    /// The `service` must NOT have any channels yet. Channels must be added through
+    /// `add_channel`.
     ///
     /// # Requirements
     ///
@@ -67,22 +70,24 @@ impl AdapterManagerHandle for AdapterManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the adapter does not exist or a service with the same identifier
-    /// already exists, or if the identifier introduces a channel that would overwrite another
-    /// channel with the same identifier. In either cases, this method reverts all its changes.
-    fn add_service(&self, service: Service) -> Result<(), AdapterError> {
+    /// Returns an error if any of:
+    /// - `service` has channels;
+    /// - a service with id `service.id` is already installed on the system;
+    /// - there is no adapter with id `service.adapter`.
+    fn add_service(&self, service: Service) -> Result<(), Error> {
         self.back_end.lock().unwrap().add_service(service)
     }
 
     /// Remove a service previously registered on the system. Typically, called by
     /// an adapter when a service (e.g. a device) is disconnected.
     ///
-    /// # AdapterError
+    /// # Error
     ///
-    /// This method returns an error if the adapter is not registered or if the service
-    /// is not registered. In either case, it attemps to clean as much as possible, even
-    /// if the state is inconsistent.
-    fn remove_service(&self, id: &Id<ServiceId>) -> Result<(), AdapterError> {
+    /// Returns an error if any of:
+    /// - there is no such service;
+    /// - there is an internal inconsistency, in which case this method will still attempt to
+    /// cleanup before returning an error.
+    fn remove_service(&self, id: &Id<ServiceId>) -> Result<(), Error> {
         self.back_end.lock().unwrap().remove_service(id)
     }
 
@@ -99,19 +104,19 @@ impl AdapterManagerHandle for AdapterManager {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    fn add_getter(&self, getter: Channel<Getter>) -> Result<(), AdapterError> {
+    fn add_getter(&self, getter: Channel<Getter>) -> Result<(), Error> {
         self.back_end.lock().unwrap().add_getter(getter)
     }
 
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its getters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_getter(&self, id: &Id<Getter>) -> Result<(), AdapterError> {
+    fn remove_getter(&self, id: &Id<Getter>) -> Result<(), Error> {
         self.back_end.lock().unwrap().remove_getter(id)
     }
 
@@ -128,19 +133,19 @@ impl AdapterManagerHandle for AdapterManager {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    fn add_setter(&self, setter: Channel<Setter>) -> Result<(), AdapterError> {
+    fn add_setter(&self, setter: Channel<Setter>) -> Result<(), Error> {
         self.back_end.lock().unwrap().add_setter(setter)
     }
 
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its setters.
     ///
-    /// # AdapterError
+    /// # Error
     ///
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    fn remove_setter(&self, id: &Id<Setter>) -> Result<(), AdapterError> {
+    fn remove_setter(&self, id: &Id<Setter>) -> Result<(), Error> {
         self.back_end.lock().unwrap().remove_setter(id)
     }
 }
@@ -241,14 +246,14 @@ impl API for AdapterManager {
 
     /// Read the latest value from a set of channels
     fn fetch_values(&self, selectors: &[GetterSelector]) ->
-        ResultMap<Id<Getter>, Option<Value>, APIError>
+        ResultMap<Id<Getter>, Option<Value>, Error>
     {
         self.back_end.lock().unwrap().fetch_values(selectors)
     }
 
     /// Send a bunch of values to a set of channels
     fn send_values(&self, keyvalues: Vec<(Vec<SetterSelector>, Value)>) ->
-        ResultMap<Id<Setter>, (), APIError>
+        ResultMap<Id<Setter>, (), Error>
     {
         self.back_end.lock().unwrap().send_values(keyvalues)
     }
