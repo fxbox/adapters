@@ -9,6 +9,8 @@ use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
 
+use transformable_channels::mpsc::*;
+
 use std::cell::RefCell;
 use std::collections::{ HashMap, HashSet };
 use std::collections::hash_map::Entry;
@@ -17,8 +19,6 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::{ Arc, Mutex };
 use std::sync::atomic::{ AtomicBool, Ordering };
-use std::sync::mpsc::{ channel, Sender };
-use std::thread;
 
 /// Data and metadata on an adapter.
 struct AdapterData {
@@ -137,7 +137,7 @@ impl Deref for SetterData {
 
 struct WatcherData {
     watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
-    on_event: Sender<WatchEvent>,
+    on_event: Box<ExtSender<WatchEvent>>,
     key: usize,
     guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
     getters: RefCell<HashSet<Id<Getter>>>,
@@ -145,7 +145,7 @@ struct WatcherData {
 }
 
 impl WatcherData {
-    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Self {
+    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Box<ExtSender<WatchEvent>>) -> Self {
         WatcherData {
             key: key,
             on_event: on_event,
@@ -178,7 +178,7 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Sender<WatchEvent>) -> Arc<WatcherData> {
+    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Box<ExtSender<WatchEvent>>) -> Arc<WatcherData> {
         let id = self.counter;
         self.counter += 1;
         let watcher = Arc::new(WatcherData::new(id, watch, is_dropped, on_event));
@@ -205,7 +205,7 @@ pub struct WatchGuard {
     key: usize,
 
     /// A channel controlling the dedicated watcher thread.
-    tx: Sender<WatchEvent>,
+    tx: Box<ExtSender<WatchEvent>>,
 
     /// Once dropped, the watch callbacks will stopped being called. Note
     /// that dropping this value is not sufficient to cancel the watch, as
@@ -213,7 +213,7 @@ pub struct WatchGuard {
     is_dropped: Arc<AtomicBool>,
 }
 impl WatchGuard {
-    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Sender<WatchEvent>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Box<ExtSender<WatchEvent>>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
         WatchGuard {
             owner: owner,
             tx: tx,
@@ -740,19 +740,12 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<Fn(WatchEvent) + Send>) -> (Sender<WatchEvent>, usize, Arc<AtomicBool>) {
-        let (tx, rx) = channel();
-        thread::spawn(move || {
-            // This thread will be destroyed when we drop `tx`, i.e. when we drop `watcher`
-            for msg in rx {
-                on_event(msg)
-            }
-        });
+    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> (Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>) {
         // Store the watcher. This will serve when we new channels are added, to hook them up
         // to this watcher.
         let is_dropped = Arc::new(AtomicBool::new(false));
         let watcher = self.watchers.lock().unwrap().create(watch.clone(),
-            &is_dropped, tx.clone());
+            &is_dropped, on_event.clone());
         let key = watcher.key;
 
         // Regroup per adapter.
@@ -796,13 +789,12 @@ impl AdapterManagerState {
             };
 
             let is_dropped = is_dropped.clone();
-            let tx = tx.clone();
-            let tx_err = tx.clone();
-            let cb = move |event| {
+            let on_err = on_event.clone();
+            let on_ok = on_event.filter_map(move |event| {
                 if is_dropped.load(Ordering::Relaxed) {
-                    return;
+                    return None;
                 }
-                let event = match event {
+                Some(match event {
                     AdapterWatchEvent::Enter { id, value } =>
                         WatchEvent::EnterRange {
                             from: id,
@@ -813,19 +805,18 @@ impl AdapterManagerState {
                             from: id,
                             value: value
                         },
-                };
-                let _ = tx.send(event);
-            };
+                })
+            });
 
             let watcher = watcher.clone();
-            for (id, result) in adapter.register_watch(request, Box::new(cb)) {
+            for (id, result) in adapter.register_watch(request, Box::new(on_ok)) {
                 match result {
                     Err(err) => {
                         let event = WatchEvent::InitializationError {
                             channel: id.clone(),
                             error: err
                         };
-                        let _ = tx_err.send(event);
+                        let _ = on_err.send(event);
                     },
                     Ok(guard) => watcher.push_guard(guard)
                 }
@@ -834,7 +825,7 @@ impl AdapterManagerState {
 
         // Upon drop, this data structure will immediately drop `is_dropped` and then dispatch
         // `unregister_channel_watch` to unregister everything else.
-        (tx, key, is_dropped)
+        (on_event, key, is_dropped)
     }
 
     /// Unregister a watch previously registered with `register_channel_watch`.

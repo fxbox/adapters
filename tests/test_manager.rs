@@ -1,5 +1,6 @@
 extern crate foxbox_adapters;
 extern crate foxbox_taxonomy;
+extern crate transformable_channels;
 
 use foxbox_adapters::adapter::*;
 use foxbox_adapters::manager::*;
@@ -8,6 +9,8 @@ use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
+
+use transformable_channels::mpsc::*;
 
 use std::collections::{ HashMap, HashSet };
 
@@ -59,7 +62,7 @@ impl Adapter for TestAdapter {
     }
 
     fn register_watch(&self, sources: Vec<(Id<Getter>, Option<Range>)>,
-        cb: Box<Fn(WatchEvent) + Send>) ->
+        cb: Box<ExtSender<WatchEvent>>) ->
             ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>
     {
         unimplemented!()

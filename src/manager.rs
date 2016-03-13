@@ -13,6 +13,8 @@ use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::{ Range, Value };
 
+use transformable_channels::mpsc::*;
+
 use std::sync::{ Arc, Mutex };
 
 /// An implementation of the AdapterManager.
@@ -260,7 +262,7 @@ impl API for AdapterManager {
 
     /// Watch for any change
     fn register_channel_watch(&self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
-        on_event: Box<Fn(WatchEvent) + Send>) -> Self::WatchGuard
+        on_event: Box<ExtSender<WatchEvent>>) -> Self::WatchGuard
     {
         let (tx, key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(watch,
             on_event);

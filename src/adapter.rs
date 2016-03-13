@@ -3,6 +3,8 @@ use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
 
+use transformable_channels::mpsc::*;
+
 /// A witness that we are currently watching for a value.
 /// Watching stops when the guard is dropped.
 pub trait AdapterWatchGuard {
@@ -142,6 +144,6 @@ pub trait Adapter: Send {
 
     /// Watch a bunch of getters as they change.
     fn register_watch(&self, Vec<(Id<Getter>, Option<Range>)>,
-        cb: Box<Fn(WatchEvent) + Send>) ->
+        cb: Box<ExtSender<WatchEvent>>) ->
             ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>;
 }

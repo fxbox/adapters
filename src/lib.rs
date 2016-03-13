@@ -2,6 +2,7 @@
 #![plugin(clippy)]
 
 extern crate foxbox_taxonomy;
+extern crate transformable_channels;
 
 /// The back-end thread, in charge of the heavy lifting of managing adapters.
 mod backend;
