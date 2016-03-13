@@ -122,6 +122,11 @@ pub enum WatchEvent {
 
 /// API that adapters must implement.
 ///
+/// # Requirements
+///
+/// Channels and Services are expected to have a stable id, which persists between reboots
+/// and { dis, re }connections.
+///
 /// Note that all methods are blocking. However, the underlying implementatino of adapters is
 /// expected to either return quickly or be able to handle several requests concurrently.
 pub trait Adapter: Send {
@@ -135,14 +140,35 @@ pub trait Adapter: Send {
     fn version(&self) -> &[u32;4];
     // ... more metadata
 
-    /// Request a value from a channel. The FoxBox (not the adapter)
-    /// is in charge of keeping track of the age of values.
+    /// Request values from a group of channels.
+    ///
+    /// The AdapterManager always attempts to group calls to `fetch_values` by `Adapter`, and then
+    /// expects the adapter to attempt to minimize the connections with the actual devices.
+    ///
+    /// The AdapterManager is in charge of keeping track of the age of values.
     fn fetch_values(&self, set: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, Error>;
 
-    /// Request that values be sent to a channel.
+    /// Request that values be sent to channels.
+    ///
+    /// The AdapterManager always attempts to group calls to `send_values` by `Adapter`, and then
+    /// expects the adapter to attempt to minimize the connections with the actual devices.
     fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error>;
 
     /// Watch a bunch of getters as they change.
+    ///
+    /// The `AdapterManager` always attempts to group calls to `fetch_values` by `Adapter`, and
+    /// then expects the adapter to attempt to minimize the connections with the actual devices.
+    /// The Adapter should however be ready to handle concurrent `register_watch` on the same
+    /// devices, possibly with distinct `Option<Range>` options.
+    ///
+    /// If a `Range` option is set, the watcher expects to receive `EnterRange`/`ExitRange` events
+    /// whenever the value available on the device enters/exits the range. If the `Range` is
+    /// a `Range::Eq(x)`, the adapter may decide to reject the request or to interpret it as
+    /// a `Range::BetweenEq { min: x, max: x }`.
+    ///
+    /// If no `Range` option is set, the watcher expects to receive `EnterRange` events whenever
+    /// a new value is available on the device. The adapter may decide to reject the request if
+    /// this is clearly not the expected usage for a device, or to throttle it.
     fn register_watch(&self, Vec<(Id<Getter>, Option<Range>)>,
         cb: Box<ExtSender<WatchEvent>>) ->
             ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>;
