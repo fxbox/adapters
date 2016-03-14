@@ -15,21 +15,37 @@ use foxbox_taxonomy::values::{ Range, Value };
 
 use transformable_channels::mpsc::*;
 
-use std::sync::{ Arc, Mutex };
+use std::thread;
 
 /// An implementation of the AdapterManager.
 pub struct AdapterManager {
-    back_end: Arc<Mutex<AdapterManagerState>>,
+    tx: RawSender<Op>
 }
 
 impl AdapterManager {
     /// Create an empty AdapterManager.
     /// This function does not attempt to load any state from the disk.
     pub fn new() -> Self {
-        let back_end = Arc::new(Mutex::new(AdapterManagerState::new()));
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let mut back_end = AdapterManagerState::new();
+            for msg in rx {
+                back_end.execute(msg);
+            }
+            // The loop will exit once self.tx is dropped.
+        });
         AdapterManager {
-            back_end: back_end,
+            tx: tx
         }
+    }
+
+    fn dispatch<T>(&self, op: Op, rx_back: Receiver<T>) -> T {
+        // Send to the back-end thread. This will panic iff the back-end thread has
+        // already panicked, i.e. probably if one of the adapters has panicked. At
+        // this stage, we probably want to relaunch the foxbox.
+        self.tx.send(op).unwrap();
+        // Again, this will panic iff the back-end thread has already panicked.
+        rx_back.recv().unwrap()
     }
 }
 
@@ -46,7 +62,11 @@ impl AdapterManagerHandle for AdapterManager {
     ///
     /// Returns an error if an adapter with the same id is already present.
     fn add_adapter(&self, adapter: Box<Adapter>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().add_adapter(adapter)
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddAdapter {
+            adapter: adapter,
+            tx: tx
+        }, rx)
     }
 
     /// Remove an adapter from the system, including all its services and channels.
@@ -57,7 +77,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// to cleanup as much as possible, even if for some reason the system is in an
     /// inconsistent state.
     fn remove_adapter(&self, id: &Id<AdapterId>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().remove_adapter(id)
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveAdapter {
+            id: id.clone(),
+            tx: tx
+        }, rx)
     }
 
     /// Add a service to the system. Called by the adapter when a new
@@ -77,7 +101,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// - a service with id `service.id` is already installed on the system;
     /// - there is no adapter with id `service.adapter`.
     fn add_service(&self, service: Service) -> Result<(), Error> {
-        self.back_end.lock().unwrap().add_service(service)
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddService {
+            service: service,
+            tx: tx
+        }, rx)
     }
 
     /// Remove a service previously registered on the system. Typically, called by
@@ -90,7 +118,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// - there is an internal inconsistency, in which case this method will still attempt to
     /// cleanup before returning an error.
     fn remove_service(&self, id: &Id<ServiceId>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().remove_service(id)
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveService {
+            id: id.clone(),
+            tx: tx
+        }, rx)
     }
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
@@ -107,7 +139,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
     fn add_getter(&self, getter: Channel<Getter>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().add_getter(getter)
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddGetter {
+            getter: getter,
+            tx: tx,
+        }, rx)
     }
 
     /// Remove a setter previously registered on the system. Typically, called by
@@ -119,7 +155,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
     fn remove_getter(&self, id: &Id<Getter>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().remove_getter(id)
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveGetter {
+            id: id.clone(),
+            tx: tx,
+        }, rx)
     }
 
     /// Add a setter to the system. Typically, this is called by the adapter when a new
@@ -136,7 +176,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
     fn add_setter(&self, setter: Channel<Setter>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().add_setter(setter)
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddSetter {
+            setter: setter,
+            tx: tx,
+        }, rx)
     }
 
     /// Remove a setter previously registered on the system. Typically, called by
@@ -148,7 +192,11 @@ impl AdapterManagerHandle for AdapterManager {
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
     fn remove_setter(&self, id: &Id<Setter>) -> Result<(), Error> {
-        self.back_end.lock().unwrap().remove_setter(id)
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveSetter {
+            id: id.clone(),
+            tx: tx
+        }, rx)
     }
 }
 
@@ -159,8 +207,12 @@ impl API for AdapterManager {
     /// A call to `API::get_services(vec![req1, req2, ...])` will return
     /// the metadata on all services matching _either_ `req1` or `req2`
     /// or ...
-    fn get_services(&self, selectors: &[ServiceSelector]) -> Vec<Service> {
-        self.back_end.lock().unwrap().get_services(selectors)
+    fn get_services(&self, selectors: Vec<ServiceSelector>) -> Vec<Service> {
+        let (tx, rx) = channel();
+        self.dispatch(Op::GetServices {
+            selectors: selectors,
+            tx: tx
+        }, rx)
     }
 
     /// Label a set of services with a set of tags.
@@ -176,8 +228,13 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if services
     /// are added after the call, they will not be affected.
-    fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().add_service_tags(selectors, tags)
+    fn add_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddServiceTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx
+        }, rx)
     }
 
     /// Remove a set of tags from a set of services.
@@ -193,16 +250,29 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if services
     /// are added after the call, they will not be affected.
-    fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().remove_service_tags(selectors, tags)
+    fn remove_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveServiceTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx,
+        }, rx)
     }
 
     /// Get a list of channels matching some conditions
-    fn get_getter_channels(&self, selectors: &[GetterSelector]) -> Vec<Channel<Getter>> {
-        self.back_end.lock().unwrap().get_getter_channels(selectors)
+    fn get_getter_channels(&self, selectors: Vec<GetterSelector>) -> Vec<Channel<Getter>> {
+        let (tx, rx) = channel();
+        self.dispatch(Op::GetGetterChannels {
+            selectors: selectors,
+            tx: tx,
+        }, rx)
     }
-    fn get_setter_channels(&self, selectors: &[SetterSelector]) -> Vec<Channel<Setter>> {
-        self.back_end.lock().unwrap().get_setter_channels(selectors)
+    fn get_setter_channels(&self, selectors: Vec<SetterSelector>) -> Vec<Channel<Setter>> {
+        let (tx, rx) = channel();
+        self.dispatch(Op::GetSetterChannels {
+            selectors: selectors,
+            tx: tx,
+        }, rx)
     }
 
     /// Label a set of channels with a set of tags.
@@ -218,12 +288,22 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if channels
     /// are added after the call, they will not be affected.
-    fn add_getter_tags(&self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().add_getter_tags(selectors, tags)
+    fn add_getter_tags(&self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddGetterTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx,
+        }, rx)
 
     }
-    fn add_setter_tags(&self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().add_setter_tags(selectors, tags)
+    fn add_setter_tags(&self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::AddSetterTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx,
+        }, rx)
     }
 
     /// Remove a set of tags from a set of channels.
@@ -239,34 +319,56 @@ impl API for AdapterManager {
     ///
     /// Note that this call is _not live_. In other words, if channels
     /// are added after the call, they will not be affected.
-    fn remove_getter_tags(&self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().remove_getter_tags(selectors, tags)
+    fn remove_getter_tags(&self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveGetterTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx,
+        }, rx)
     }
-    fn remove_setter_tags(&self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
-        self.back_end.lock().unwrap().remove_setter_tags(selectors, tags)
+    fn remove_setter_tags(&self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
+        let (tx, rx) = channel();
+        self.dispatch(Op::RemoveSetterTags {
+            selectors: selectors,
+            tags: tags,
+            tx: tx,
+        }, rx)
     }
 
     /// Read the latest value from a set of channels
-    fn fetch_values(&self, selectors: &[GetterSelector]) ->
+    fn fetch_values(&self, selectors: Vec<GetterSelector>) ->
         ResultMap<Id<Getter>, Option<Value>, Error>
     {
-        self.back_end.lock().unwrap().fetch_values(selectors)
+        let (tx, rx) = channel();
+        self.dispatch(Op::FetchValues {
+            selectors: selectors,
+            tx: tx,
+        }, rx)
     }
 
     /// Send a bunch of values to a set of channels
     fn send_values(&self, keyvalues: Vec<(Vec<SetterSelector>, Value)>) ->
         ResultMap<Id<Setter>, (), Error>
     {
-        self.back_end.lock().unwrap().send_values(keyvalues)
+        let (tx, rx) = channel();
+        self.dispatch(Op::SendValues {
+            keyvalues: keyvalues,
+            tx: tx,
+        }, rx)
     }
 
     /// Watch for any change
     fn register_channel_watch(&self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
         on_event: Box<ExtSender<WatchEvent>>) -> Self::WatchGuard
     {
-        let (tx, key, is_dropped) = self.back_end.lock().unwrap().register_channel_watch(watch,
-            on_event);
-        WatchGuard::new(self.back_end.clone(), tx, key, is_dropped)
+        let (tx, rx) = channel();
+        let (tx_dropped, key, is_dropped) = self.dispatch(Op::RegisterChannelWatch {
+            watch: watch,
+            on_event: on_event,
+            tx: tx
+        }, rx);
+        WatchGuard::new(Box::new(self.tx.clone()), tx_dropped, key, is_dropped)
     }
 
     /// A value that causes a disconnection once it is dropped.

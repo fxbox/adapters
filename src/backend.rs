@@ -199,13 +199,13 @@ impl Default for WatchMap {
 /// A data structure that causes cancellation of a watch when dropped.
 pub struct WatchGuard {
     /// The channel used to request unregistration.
-    owner: Arc<Mutex<AdapterManagerState>>,
+    tx_owner: Box<ExtSender<Op>>,
 
     /// The cancellation key.
     key: usize,
 
     /// A channel controlling the dedicated watcher thread.
-    tx: Box<ExtSender<WatchEvent>>,
+    tx_watcher: Box<ExtSender<WatchEvent>>,
 
     /// Once dropped, the watch callbacks will stopped being called. Note
     /// that dropping this value is not sufficient to cancel the watch, as
@@ -213,10 +213,10 @@ pub struct WatchGuard {
     is_dropped: Arc<AtomicBool>,
 }
 impl WatchGuard {
-    pub fn new(owner: Arc<Mutex<AdapterManagerState>>, tx: Box<ExtSender<WatchEvent>>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+    pub fn new(tx_owner: Box<ExtSender<Op>>, tx_watcher: Box<ExtSender<WatchEvent>>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
         WatchGuard {
-            owner: owner,
-            tx: tx,
+            tx_owner: tx_owner,
+            tx_watcher: tx_watcher,
             key: key,
             is_dropped: is_dropped
         }
@@ -225,7 +225,10 @@ impl WatchGuard {
 impl Drop for WatchGuard {
     fn drop(&mut self) {
         self.is_dropped.store(true, Ordering::Relaxed);
-        self.owner.lock().unwrap().unregister_channel_watch(self.key)
+        // Ignore result. If the thread is already down, just forget about it.
+        let _ = self.tx_owner.send(Op::UnregisterChannelWatch {
+            key: self.key
+        });
     }
 }
 
@@ -267,7 +270,7 @@ impl AdapterManagerState {
         Ok(adapter)
     }
 
-    fn with_services<F>(&self, selectors: &[ServiceSelector], mut cb: F) where F: FnMut(&Rc<RefCell<Service>>) {
+    fn with_services<F>(&self, selectors: Vec<ServiceSelector>, mut cb: F) where F: FnMut(&Rc<RefCell<Service>>) {
         for service in self.service_by_id.values() {
             let matches = selectors.iter().find(|selector| {
                 selector.matches(&*service.borrow())
@@ -279,7 +282,7 @@ impl AdapterManagerState {
     }
 
     /// Iterate over all channels that match any selector in a slice.
-    fn with_channels<S, K, V, F>(selectors: &[S], map: &HashMap<Id<K>, V>, mut cb: F)
+    fn with_channels<S, K, V, F>(selectors: Vec<S>, map: &HashMap<Id<K>, V>, mut cb: F)
         where F: FnMut(&V),
               V: SelectedBy<S>,
     {
@@ -294,7 +297,7 @@ impl AdapterManagerState {
     }
 
     /// Iterate mutably over all channels that match any selector in a slice.
-    fn with_channels_mut<S, K, V, F>(selectors: &[S], map: &mut HashMap<Id<K>, V>, mut cb: F)
+    fn with_channels_mut<S, K, V, F>(selectors: Vec<S>, map: &mut HashMap<Id<K>, V>, mut cb: F)
         where F: FnMut(&mut V),
               V: SelectedBy<S>,
     {
@@ -309,34 +312,34 @@ impl AdapterManagerState {
     }
 
     /// Iterate over all channels that match any selector in a slice.
-    fn aux_get_channels<S, K, V, T>(selectors: &[S], map: &HashMap<Id<K>, V>) -> Vec<Channel<T>>
+    fn aux_get_channels<S, K, V, T>(selectors: Vec<S>, map: &HashMap<Id<K>, V>) -> Vec<Channel<T>>
         where V: SelectedBy<S> + Deref<Target = Channel<T>>,
               T: IOMechanism,
               Channel<T>: Clone
     {
         let mut result = Vec::new();
-        Self::with_channels(&selectors, map, |data| {
+        Self::with_channels(selectors, map, |data| {
             result.push((*data.deref()).clone());
         });
         result
     }
 
-    fn aux_add_channel_tags<S, K, V>(selectors: &[S], tags: &[Id<TagId>], map: &mut HashMap<Id<K>, V>) -> usize
+    fn aux_add_channel_tags<S, K, V>(selectors: Vec<S>, tags: Vec<Id<TagId>>, map: &mut HashMap<Id<K>, V>) -> usize
         where V: SelectedBy<S> + Tagged
     {
         let mut result = 0;
-        Self::with_channels_mut(&selectors, map, |mut data| {
+        Self::with_channels_mut(selectors, map, |mut data| {
             data.insert_tags(&tags);
             result += 1;
         });
         result
     }
 
-    fn aux_remove_channel_tags<S, K, V>(selectors: &[S], tags: &[Id<TagId>], map: &mut HashMap<Id<K>, V>) -> usize
+    fn aux_remove_channel_tags<S, K, V>(selectors: Vec<S>, tags: Vec<Id<TagId>>, map: &mut HashMap<Id<K>, V>) -> usize
         where V: SelectedBy<S> + Tagged
     {
         let mut result = 0;
-        Self::with_channels_mut(&selectors, map, |mut data| {
+        Self::with_channels_mut(selectors, map, |mut data| {
             data.remove_tags(&tags);
             result += 1;
         });
@@ -344,7 +347,7 @@ impl AdapterManagerState {
     }
 
     /*
-        fn iter_channels<'a, S, K, V>(selectors: &[S], map: &HashMap<Id<K>, V>) ->
+        fn iter_channels<'a, S, K, V>(selectors: Vec<S>, map: &HashMap<Id<K>, V>) ->
             Filter<Values<'a, Id<K>, V>, &'a (Fn(&'a V) -> bool)>
             where V: SelectedBy<S>
         {
@@ -358,6 +361,172 @@ impl AdapterManagerState {
         }
     */
 
+}
+
+pub enum Op {
+    AddAdapter {
+        adapter: Box<Adapter>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    RemoveAdapter {
+        id: Id<AdapterId>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    AddService {
+        service: Service,
+        tx: RawSender<Result<(), Error>>,
+    },
+    RemoveService {
+        id: Id<ServiceId>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    AddGetter {
+        getter: Channel<Getter>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    RemoveGetter {
+        id: Id<Getter>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    AddSetter {
+        setter: Channel<Setter>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    RemoveSetter {
+        id: Id<Setter>,
+        tx: RawSender<Result<(), Error>>,
+    },
+    GetServices {
+        selectors: Vec<ServiceSelector>,
+        tx: RawSender<Vec<Service>>,
+    },
+    AddServiceTags {
+        selectors: Vec<ServiceSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    RemoveServiceTags {
+        selectors: Vec<ServiceSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    GetGetterChannels {
+        selectors: Vec<GetterSelector>,
+        tx: RawSender<Vec<Channel<Getter>>>,
+    },
+    GetSetterChannels {
+        selectors: Vec<SetterSelector>,
+        tx: RawSender<Vec<Channel<Setter>>>,
+    },
+    AddGetterTags {
+        selectors: Vec<GetterSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    AddSetterTags {
+        selectors: Vec<SetterSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    RemoveGetterTags {
+        selectors: Vec<GetterSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    RemoveSetterTags {
+        selectors: Vec<SetterSelector>,
+        tags: Vec<Id<TagId>>,
+        tx: RawSender<usize>,
+    },
+    FetchValues {
+        selectors: Vec<GetterSelector>,
+        tx: RawSender<ResultSet<Id<Getter>, Option<Value>, Error>>,
+    },
+    SendValues {
+        keyvalues: Vec<(Vec<SetterSelector>, Value)>,
+        tx: RawSender<ResultMap<Id<Setter>, (), Error>>,
+    },
+    RegisterChannelWatch {
+        watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
+        on_event: Box<ExtSender<WatchEvent>>,
+        tx: RawSender<(Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>)>
+    },
+    UnregisterChannelWatch {
+        key: usize
+    },
+}
+
+
+impl AdapterManagerState {
+    pub fn execute(&mut self, op: Op) {
+        use self::Op::*;
+        match op {
+            AddAdapter { adapter, tx } => {
+                let _ = tx.send(self.add_adapter(adapter));
+            },
+            AddService { service, tx } => {
+                let _ = tx.send(self.add_service(service));
+            },
+            AddGetter { getter, tx } => {
+                let _ = tx.send(self.add_getter(getter));
+            },
+            AddSetter { setter, tx } => {
+                let _ = tx.send(self.add_setter(setter));
+            },
+            RemoveAdapter { id, tx } => {
+                let _ = tx.send(self.remove_adapter(id));
+            },
+            RemoveService { id, tx } => {
+                let _ = tx.send(self.remove_service(id));
+            },
+            RemoveGetter { id, tx } => {
+                let _ = tx.send(self.remove_getter(id));
+            },
+            RemoveSetter { id, tx } => {
+                let _ = tx.send(self.remove_setter(id));
+            },
+            GetServices { selectors, tx } => {
+                let _ = tx.send(self.get_services(selectors));
+            },
+            GetGetterChannels { selectors, tx } => {
+                let _ = tx.send(self.get_getter_channels(selectors));
+            },
+            GetSetterChannels { selectors, tx } => {
+                let _ = tx.send(self.get_setter_channels(selectors));
+            },
+            AddServiceTags { selectors, tags, tx } => {
+                let _ = tx.send(self.add_service_tags(selectors, tags));
+            },
+            AddGetterTags { selectors, tags, tx } => {
+                let _ = tx.send(self.add_getter_tags(selectors, tags));
+            },
+            AddSetterTags { selectors, tags, tx } => {
+                let _ = tx.send(self.add_setter_tags(selectors, tags));
+            },
+            RemoveServiceTags { selectors, tags, tx } => {
+                let _ = tx.send(self.remove_service_tags(selectors, tags));
+            },
+            RemoveGetterTags { selectors, tags, tx } => {
+                let _ = tx.send(self.remove_getter_tags(selectors, tags));
+            },
+            RemoveSetterTags { selectors, tags, tx } => {
+                let _ = tx.send(self.remove_setter_tags(selectors, tags));
+            },
+            FetchValues { selectors, tx } => {
+                let _ = tx.send(self.fetch_values(selectors));
+            },
+            SendValues { keyvalues, tx } => {
+                let _ = tx.send(self.send_values(keyvalues));
+            },
+            RegisterChannelWatch { watch, on_event, tx } => {
+                let _ = tx.send(self.register_channel_watch(watch, on_event));
+            },
+            UnregisterChannelWatch { key } => {
+                // Silent method, no result.
+                self.unregister_channel_watch(key);
+            },
+        }
+    }
 }
 
 impl AdapterManagerState {
@@ -393,12 +562,12 @@ impl AdapterManagerState {
     /// Returns an error if no adapter with this identifier exists. Otherwise, attempts
     /// to cleanup as much as possible, even if for some reason the system is in an
     /// inconsistent state.
-    pub fn remove_adapter(&mut self, id: &Id<AdapterId>) -> Result<(), Error> {
-        let mut services = match self.adapter_by_id.remove(id) {
+    fn remove_adapter(&mut self, id: Id<AdapterId>) -> Result<(), Error> {
+        let mut services = match self.adapter_by_id.remove(&id) {
             Some(AdapterData {services: adapter_services, ..}) => {
                 adapter_services
             }
-            None => return Err(Error::InternalError(InternalError::NoSuchAdapter(id.clone()))),
+            None => return Err(Error::InternalError(InternalError::NoSuchAdapter(id))),
         };
         for (service_id, _) in services.drain() {
             let _ignored = self.aux_remove_service(&service_id);
@@ -422,7 +591,7 @@ impl AdapterManagerState {
     /// - `service` has channels;
     /// - a service with id `service.id` is already installed on the system;
     /// - there is no adapter with id `service.adapter`.
-    pub fn add_service(&mut self, service: Service) -> Result<(), Error> {
+    fn add_service(&mut self, service: Service) -> Result<(), Error> {
         // Make sure that there are no channels.
         if !service.getters.is_empty() || !service.setters.is_empty() {
             return Err(Error::InternalError(InternalError::InvalidInitialService));
@@ -463,13 +632,13 @@ impl AdapterManagerState {
     /// - there is no such service;
     /// - there is an internal inconsistency, in which case this method will still attempt to
     /// cleanup before returning an error.
-    pub fn remove_service(&mut self, service_id: &Id<ServiceId>) -> Result<(), Error> {
-        let adapter = try!(self.aux_remove_service(service_id));
+    fn remove_service(&mut self, service_id: Id<ServiceId>) -> Result<(), Error> {
+        let adapter = try!(self.aux_remove_service(&service_id));
         match self.adapter_by_id.get_mut(&adapter) {
             None => Err(Error::InternalError(InternalError::NoSuchAdapter(adapter.clone()))),
             Some(mut data) => {
                 if data.services.remove(&service_id).is_none() {
-                    Err(Error::InternalError(InternalError::NoSuchService(service_id.clone())))
+                    Err(Error::InternalError(InternalError::NoSuchService(service_id)))
                 } else {
                     Ok(())
                 }
@@ -490,7 +659,7 @@ impl AdapterManagerState {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    pub fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), Error> {
+    fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), Error> {
         let getter_by_id = &mut self.getter_by_id;
         let service = match self.service_by_id.get_mut(&getter.service) {
             None => return Err(Error::InternalError(InternalError::NoSuchService(getter.service.clone()))),
@@ -539,16 +708,16 @@ impl AdapterManagerState {
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    pub fn remove_getter(&mut self, id: &Id<Getter>) -> Result<(), Error> {
-        let getter = match self.getter_by_id.remove(id) {
-            None => return Err(Error::InternalError(InternalError::NoSuchGetter(id.clone()))),
+    fn remove_getter(&mut self, id: Id<Getter>) -> Result<(), Error> {
+        let getter = match self.getter_by_id.remove(&id) {
+            None => return Err(Error::InternalError(InternalError::NoSuchGetter(id))),
             Some(getter) => getter
         };
         match self.service_by_id.get_mut(&getter.getter.service) {
             None => Err(Error::InternalError(InternalError::NoSuchService(getter.getter.service))),
             Some(service) => {
                 if service.borrow_mut().getters.remove(&id).is_none() {
-                    Err(Error::InternalError(InternalError::NoSuchGetter(id.clone())))
+                    Err(Error::InternalError(InternalError::NoSuchGetter(id)))
                 } else {
                     Ok(())
                 }
@@ -569,7 +738,7 @@ impl AdapterManagerState {
     /// Returns an error if the adapter is not registered, the parent service is not
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
-    pub fn add_setter(&mut self, setter: Channel<Setter>) -> Result<(), Error> {
+    fn add_setter(&mut self, setter: Channel<Setter>) -> Result<(), Error> {
         let service = match self.service_by_id.get_mut(&setter.service) {
             None => return Err(Error::InternalError(InternalError::NoSuchService(setter.service.clone()))),
             Some(service) => service
@@ -599,16 +768,16 @@ impl AdapterManagerState {
     /// This method returns an error if the setter is not registered or if the service
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
-    pub fn remove_setter(&mut self, id: &Id<Setter>) -> Result<(), Error> {
-        let setter = match self.setter_by_id.remove(id) {
-            None => return Err(Error::InternalError(InternalError::NoSuchSetter(id.clone()))),
+    fn remove_setter(&mut self, id: Id<Setter>) -> Result<(), Error> {
+        let setter = match self.setter_by_id.remove(&id) {
+            None => return Err(Error::InternalError(InternalError::NoSuchSetter(id))),
             Some(setter) => setter
         };
         match self.service_by_id.get_mut(&setter.setter.service) {
             None => Err(Error::InternalError(InternalError::NoSuchService(setter.setter.service))),
             Some(service) => {
-                if service.borrow_mut().setters.remove(id).is_none() {
-                    Err(Error::InternalError(InternalError::NoSuchSetter(id.clone())))
+                if service.borrow_mut().setters.remove(&id).is_none() {
+                    Err(Error::InternalError(InternalError::NoSuchSetter(id)))
                 } else {
                     Ok(())
                 }
@@ -616,7 +785,7 @@ impl AdapterManagerState {
         }
     }
 
-    pub fn get_services(&self, selectors: &[ServiceSelector]) -> Vec<Service> {
+    fn get_services(&self, selectors: Vec<ServiceSelector>) -> Vec<Service> {
         // This implementation is not nearly optimal, but it should be sufficient in a system
         // with relatively few services.
         let mut result = Vec::new();
@@ -626,11 +795,11 @@ impl AdapterManagerState {
         result
     }
 
-    pub fn add_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
+    fn add_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
             let tag_set = &mut service.borrow_mut().tags;
-            for tag in tags {
+            for tag in &tags {
                 let _ = tag_set.insert(tag.clone());
             }
             result += 1;
@@ -638,43 +807,43 @@ impl AdapterManagerState {
         result
     }
 
-    pub fn remove_service_tags(&self, selectors: &[ServiceSelector], tags: &[Id<TagId>]) -> usize {
+    fn remove_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
             let tag_set = &mut service.borrow_mut().tags;
-            for tag in tags {
-                let _ = tag_set.remove(tag);
+            for tag in &tags {
+                let _ = tag_set.remove(&tag);
             }
             result += 1;
         });
         result
     }
 
-    pub fn get_getter_channels(&self, selectors: &[GetterSelector]) -> Vec<Channel<Getter>>
+    fn get_getter_channels(&self, selectors: Vec<GetterSelector>) -> Vec<Channel<Getter>>
     {
         Self::aux_get_channels(selectors, &self.getter_by_id)
     }
-    pub fn get_setter_channels(&self, selectors: &[SetterSelector]) -> Vec<Channel<Setter>>
+    fn get_setter_channels(&self, selectors: Vec<SetterSelector>) -> Vec<Channel<Setter>>
     {
         Self::aux_get_channels(selectors, &self.setter_by_id)
     }
 
 
-    pub fn add_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
+    fn add_getter_tags(&mut self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
         Self::aux_add_channel_tags(selectors, tags, &mut self.getter_by_id)
     }
-    pub fn add_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
+    fn add_setter_tags(&mut self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
         Self::aux_add_channel_tags(selectors, tags, &mut self.setter_by_id)
     }
-    pub fn remove_getter_tags(&mut self, selectors: &[GetterSelector], tags: &[Id<TagId>]) -> usize {
+    fn remove_getter_tags(&mut self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
         Self::aux_remove_channel_tags(selectors, tags, &mut self.getter_by_id)
     }
-    pub fn remove_setter_tags(&mut self, selectors: &[SetterSelector], tags: &[Id<TagId>]) -> usize {
+    fn remove_setter_tags(&mut self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
         Self::aux_remove_channel_tags(selectors, tags, &mut self.setter_by_id)
     }
 
     /// Read the latest value from a set of channels
-    pub fn fetch_values(&mut self, selectors: &[GetterSelector]) -> ResultSet<Id<Getter>, Option<Value>, Error> {
+    fn fetch_values(&mut self, selectors: Vec<GetterSelector>) -> ResultSet<Id<Getter>, Option<Value>, Error> {
         // First group per adapter, so as to let adapters optimize fetches.
         let mut per_adapter = HashMap::new();
         Self::with_channels(selectors, &self.getter_by_id, |data| {
@@ -707,11 +876,11 @@ impl AdapterManagerState {
     }
 
     /// Send values to a set of channels
-    pub fn send_values(&self, mut keyvalues: Vec<(Vec<SetterSelector>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
+    fn send_values(&self, mut keyvalues: Vec<(Vec<SetterSelector>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
         // First determine the channels and group them by adapter.
         let mut per_adapter = HashMap::new();
         for (selectors, value) in keyvalues.drain(..) {
-            Self::with_channels(&selectors, &self.setter_by_id, |data| {
+            Self::with_channels(selectors, &self.setter_by_id, |data| {
                 use std::collections::hash_map::Entry::*;
                 match per_adapter.entry(data.setter.adapter.clone()) {
                     Vacant(entry) => {
@@ -740,7 +909,7 @@ impl AdapterManagerState {
     }
 
 
-    pub fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> (Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>) {
+    fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> (Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>) {
         // Store the watcher. This will serve when we new channels are added, to hook them up
         // to this watcher.
         let is_dropped = Arc::new(AtomicBool::new(false));
@@ -755,7 +924,7 @@ impl AdapterManagerState {
             // Find out which channels already match the selectors and attach
             // the watcher immediately.
             let filter = &filter;
-            Self::with_channels_mut(&selectors, &mut self.getter_by_id, |mut getter_data| {
+            Self::with_channels_mut(selectors, &mut self.getter_by_id, |mut getter_data| {
                 use std::collections::hash_map::Entry::*;
                 getter_data.watchers.insert(watcher.clone());
                 watcher.push_getter(&getter_data.id);

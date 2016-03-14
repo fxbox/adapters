@@ -257,20 +257,20 @@ fn test_add_remove_services() {
     }
 
     println!("* We shouldn't have any channels.");
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new()]).len(), 0);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new()]).len(), 0);
 
     println!("* Make sure that none of the services has been added.");
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new()]).len(), 0);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new()]).len(), 0);
 
     println!("* Adding a service can succeed.");
     manager.add_adapter(Box::new(TestAdapter::new(&id_1))).unwrap();
     manager.add_service(service_1.clone()).unwrap();
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new()]).len(), 1);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new()]).len(), 1);
 
     println!("* Make sure that we are finding the right service.");
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 1);
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new().with_id(service_id_2.clone())]).len(), 0);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 1);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new().with_id(service_id_2.clone())]).len(), 0);
 
     println!("* Adding a second service with the same id should fail.");
     match manager.add_service(service_1.clone()) {
@@ -289,8 +289,8 @@ fn test_add_remove_services() {
     }
 
     println!("* The attempt shouldn't let any channel lying around.");
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new()]).len(), 0);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new()]).len(), 0);
 
     println!("* Adding channels should fail if the adapter doesn't match that of its service.");
     match manager.add_getter(getter_2_with_bad_adapter) {
@@ -309,8 +309,8 @@ fn test_add_remove_services() {
     }
 
     println!("* The attempt shouldn't let any channel lying around.");
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new()]).len(), 0);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new()]).len(), 0);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new()]).len(), 0);
 
 /*
     let getter_3 = Channel {
@@ -357,21 +357,21 @@ fn test_add_remove_services() {
     }
 
     println!("* Make sure that the old service is still here and the new one isn't.");
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 1);
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new().with_id(service_id_3.clone())]).len(), 0);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 1);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new().with_id(service_id_3.clone())]).len(), 0);
 
     println!("* Make sure that the old channels are still here and the new ones aren't.");
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new().with_id(getter_id_1.clone())]).len(), 1);
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new().with_id(getter_id_3.clone())]).len(), 0);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new().with_id(setter_id_1.clone())]).len(), 1);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new().with_id(setter_id_3.clone())]).len(), 0);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new().with_id(getter_id_1.clone())]).len(), 1);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new().with_id(getter_id_3.clone())]).len(), 0);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new().with_id(setter_id_1.clone())]).len(), 1);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new().with_id(setter_id_3.clone())]).len(), 0);
 
     println!("* Make sure that we can remove the adapter we have successfully added and that this \
                 removes the service and channels.");
     manager.remove_adapter(&id_1).unwrap();
-    assert_eq!(manager.get_services(&vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 0);
-    assert_eq!(manager.get_getter_channels(&vec![GetterSelector::new().with_id(getter_id_1.clone())]).len(), 0);
-    assert_eq!(manager.get_setter_channels(&vec![SetterSelector::new().with_id(setter_id_1.clone())]).len(), 0);
+    assert_eq!(manager.get_services(vec![ServiceSelector::new().with_id(service_id_1.clone())]).len(), 0);
+    assert_eq!(manager.get_getter_channels(vec![GetterSelector::new().with_id(getter_id_1.clone())]).len(), 0);
+    assert_eq!(manager.get_setter_channels(vec![SetterSelector::new().with_id(setter_id_1.clone())]).len(), 0);
 
     println!("* Make sure that we cannot remove the adapter we failed to add.");
     match manager.remove_adapter(&id_2) {
