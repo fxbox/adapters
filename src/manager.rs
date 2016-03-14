@@ -18,6 +18,7 @@ use transformable_channels::mpsc::*;
 use std::thread;
 
 /// An implementation of the AdapterManager.
+#[derive(Clone)]
 pub struct AdapterManager {
     tx: RawSender<Op>
 }
