@@ -4,7 +4,9 @@
 //! - adapters use it to (un)register themselves, as well as services and channels;
 //! - it exposes an implementation of the taxonomy API.
 
-use backend::*;
+pub use backend::WatchGuard;
+
+use backend::{ Op, AdapterManagerState };
 use adapter::{ Adapter, AdapterManagerHandle };
 
 use foxbox_taxonomy::api::{ API, Error, ResultMap, WatchEvent };

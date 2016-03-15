@@ -5,7 +5,7 @@ extern crate foxbox_taxonomy;
 extern crate transformable_channels;
 
 /// The back-end thread, in charge of the heavy lifting of managing adapters.
-pub mod backend;
+mod backend;
 
 /// The manager provides an API for (un)registering adapters, services, channels, and
 /// uses these to implements the taxonomy API.
