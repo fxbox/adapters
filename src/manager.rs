@@ -366,12 +366,12 @@ impl API for AdapterManager {
         on_event: Box<ExtSender<WatchEvent>>) -> Self::WatchGuard
     {
         let (tx, rx) = channel();
-        let (tx_dropped, key, is_dropped) = self.dispatch(Op::RegisterChannelWatch {
+        let (key, is_dropped) = self.dispatch(Op::RegisterChannelWatch {
             watch: watch,
             on_event: on_event,
             tx: tx
         }, rx);
-        WatchGuard::new(Box::new(self.tx.clone()), tx_dropped, key, is_dropped)
+        WatchGuard::new(Box::new(self.tx.clone()), key, is_dropped)
     }
 
     /// A value that causes a disconnection once it is dropped.

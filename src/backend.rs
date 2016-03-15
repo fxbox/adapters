@@ -12,7 +12,7 @@ use foxbox_taxonomy::values::*;
 use transformable_channels::mpsc::*;
 
 use std::cell::RefCell;
-use std::collections::{ HashMap, HashSet };
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::hash::{ Hash, Hasher };
 use std::ops::Deref;
@@ -62,26 +62,22 @@ impl<T> Tagged for Channel<T> where T: IOMechanism {
     }
 }
 
-impl Hash for WatcherData {
-     fn hash<H>(&self, state: &mut H) where H: Hasher {
-         self.key.hash(state)
-     }
-}
-impl Eq for WatcherData {}
-impl PartialEq for WatcherData {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
-}
+/// A key used to uniquely represent a watcher.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct WatchKey(usize);
+
 struct GetterData {
+    /// The getter itself.
     getter: Channel<Getter>,
-    watchers: HashSet<Arc<WatcherData>>,
+
+    /// Watchers that currently watch this channel.
+    watchers: HashMap<WatchKey, Arc<WatcherData>>,
 }
 impl GetterData {
     fn new(getter: Channel<Getter>) -> Self {
         GetterData {
             getter: getter,
-            watchers: HashSet::new(),
+            watchers: HashMap::new(),
         }
     }
 }
@@ -134,34 +130,59 @@ impl Deref for SetterData {
     }
 }
 
-
+/// All the information on a currently registered watch.
 struct WatcherData {
+    /// The criteria for watching.
     watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
+
+    /// The listener for this watch.
     on_event: Box<ExtSender<WatchEvent>>,
-    key: usize,
-    guards: RefCell<Vec<Box<AdapterWatchGuard>>>,
-    getters: RefCell<HashSet<Id<Getter>>>,
+
+    /// A unique key used to locate the WatcherData in the
+    /// WatchMap.
+    key: WatchKey,
+
+    /// The individual guard for each getter currently watched.
+    guards: RefCell<HashMap<Id<Getter>, Vec<Box<AdapterWatchGuard>>>>,
+
+    /// `true` once the WatchGuard has dropped. In this
+    /// case, the `WatcherData` will shortly be removed
+    /// from the WatchMap.
     is_dropped: Arc<AtomicBool>,
 }
 
+impl Hash for WatcherData {
+     fn hash<H>(&self, state: &mut H) where H: Hasher {
+         self.key.hash(state)
+     }
+}
+impl Eq for WatcherData {}
+impl PartialEq for WatcherData {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 impl WatcherData {
-    fn new(key: usize, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Box<ExtSender<WatchEvent>>) -> Self {
+    fn new(key: WatchKey, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> Self {
         WatcherData {
             key: key,
             on_event: on_event,
             watch: watch,
-            is_dropped: is_dropped.clone(),
-            guards: RefCell::new(Vec::new()),
-            getters: RefCell::new(HashSet::new()),
+            is_dropped: Arc::new(AtomicBool::new(false)),
+            guards: RefCell::new(HashMap::new()),
         }
     }
 
-    fn push_guard(&self, guard: Box<AdapterWatchGuard>) {
-        self.guards.borrow_mut().push(guard);
-    }
-
-    fn push_getter(&self, id: &Id<Getter>) {
-        self.getters.borrow_mut().insert(id.clone());
+    fn push_guard(&self, id: Id<Getter>, guard: Box<AdapterWatchGuard>) {
+        match self.guards.borrow_mut().entry(id) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(guard);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(vec![guard]);
+            }
+        }
     }
 }
 
@@ -169,7 +190,7 @@ pub struct WatchMap {
     /// A counter of all watchers that have been added to the system.
     /// Used to generate unique keys.
     counter: usize,
-    watchers: HashMap<usize, Arc<WatcherData>>,
+    watchers: HashMap<WatchKey, Arc<WatcherData>>,
 }
 impl WatchMap {
     fn new() -> Self {
@@ -178,14 +199,14 @@ impl WatchMap {
             watchers: HashMap::new()
         }
     }
-    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, is_dropped: &Arc<AtomicBool>, on_event: Box<ExtSender<WatchEvent>>) -> Arc<WatcherData> {
-        let id = self.counter;
+    fn create(&mut self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> Arc<WatcherData> {
+        let id = WatchKey(self.counter);
         self.counter += 1;
-        let watcher = Arc::new(WatcherData::new(id, watch, is_dropped, on_event));
+        let watcher = Arc::new(WatcherData::new(id, watch, on_event));
         self.watchers.insert(id, watcher.clone());
         watcher
     }
-    fn remove(&mut self, key: usize) -> Option<Arc<WatcherData>> {
+    fn remove(&mut self, key: WatchKey) -> Option<Arc<WatcherData>> {
         self.watchers.remove(&key)
     }
 }
@@ -202,10 +223,7 @@ pub struct WatchGuard {
     tx_owner: Box<ExtSender<Op>>,
 
     /// The cancellation key.
-    key: usize,
-
-    /// A channel controlling the dedicated watcher thread.
-    tx_watcher: Box<ExtSender<WatchEvent>>,
+    key: WatchKey,
 
     /// Once dropped, the watch callbacks will stopped being called. Note
     /// that dropping this value is not sufficient to cancel the watch, as
@@ -213,10 +231,9 @@ pub struct WatchGuard {
     is_dropped: Arc<AtomicBool>,
 }
 impl WatchGuard {
-    pub fn new(tx_owner: Box<ExtSender<Op>>, tx_watcher: Box<ExtSender<WatchEvent>>, key: usize, is_dropped: Arc<AtomicBool>) -> Self {
+    pub fn new(tx_owner: Box<ExtSender<Op>>, key: WatchKey, is_dropped: Arc<AtomicBool>) -> Self {
         WatchGuard {
             tx_owner: tx_owner,
-            tx_watcher: tx_watcher,
             key: key,
             is_dropped: is_dropped
         }
@@ -231,6 +248,8 @@ impl Drop for WatchGuard {
         });
     }
 }
+
+type WatcherPerAdapter = HashMap<Id<AdapterId>, (Vec<(Id<Getter>, Option<Range>)>, Arc<WatcherData>)>;
 
 pub struct AdapterManagerState {
     /// Adapters, indexed by their id.
@@ -330,26 +349,112 @@ impl AdapterManagerState {
         result
     }
 
-    fn aux_add_channel_tags<S, K, V>(selectors: Vec<S>, tags: Vec<Id<TagId>>, map: &mut HashMap<Id<K>, V>) -> usize
-        where V: SelectedBy<S> + Tagged
-    {
-        let mut result = 0;
-        Self::with_channels_mut(selectors, map, |mut data| {
-            data.insert_tags(&tags);
-            result += 1;
-        });
-        result
+    fn aux_register_watch_per_adapter(&mut self, mut per_adapter: WatcherPerAdapter) {
+        // Now dispatch to adapters.
+        for (adapter_id, (request, watch_data)) in per_adapter.drain() {
+            let adapter = match self.adapter_by_id.get(&adapter_id) {
+                None => {
+                    debug_assert!(false, "We have a registered channel whose adapter is not registered: {:?}", adapter_id);
+                    // FIXME: Logging would be nice.
+                    continue
+                },
+                Some(adapter) => adapter
+            };
+            let is_dropped = watch_data.is_dropped.clone();
+            let on_ok = watch_data.on_event.filter_map(move |event| {
+                if is_dropped.load(Ordering::Relaxed) {
+                    return None;
+                }
+                Some(match event {
+                    AdapterWatchEvent::Enter { id, value } =>
+                        WatchEvent::EnterRange {
+                            from: id,
+                            value: value
+                        },
+                    AdapterWatchEvent::Exit { id, value } =>
+                        WatchEvent::ExitRange {
+                            from: id,
+                            value: value
+                        },
+                })
+            });
+            for (id, result) in adapter.register_watch(request, Box::new(on_ok)) {
+                match result {
+                    Err(err) => {
+                        let event = WatchEvent::InitializationError {
+                            channel: id.clone(),
+                            error: err
+                        };
+                        let _ = watch_data.on_event.send(event);
+                    },
+                    Ok(guard) => watch_data.push_guard(id, guard)
+                }
+            }
+        }
     }
 
-    fn aux_remove_channel_tags<S, K, V>(selectors: Vec<S>, tags: Vec<Id<TagId>>, map: &mut HashMap<Id<K>, V>) -> usize
-        where V: SelectedBy<S> + Tagged
-    {
-        let mut result = 0;
-        Self::with_channels_mut(selectors, map, |mut data| {
-            data.remove_tags(&tags);
-            result += 1;
-        });
-        result
+    fn aux_getter_may_need_unregistration(getter_data: &mut GetterData) {
+        let mut keys_to_drop = vec![];
+        {
+            for (key, ref watcher) in &getter_data.watchers {
+                for &(ref selectors, _) in &watcher.watch {
+                    let should_disconnect = selectors.iter().find(|selector| {
+                        !getter_data.matches(selector)
+                    }).is_some();
+                    if !should_disconnect {
+                        // The channel hasn't stopped matching this watcher.
+                        continue;
+                    }
+
+                    // Inform of topology change
+                    let on_event = &watcher.on_event;
+                    let _ = on_event.send(WatchEvent::GetterRemoved(getter_data.id.clone()));
+
+                    // Drop individual guard.
+                    watcher.guards.borrow_mut().remove(&getter_data.id);
+                    keys_to_drop.push(*key);
+                }
+            }
+        }
+        for key in keys_to_drop {
+            getter_data.watchers.remove(&key);
+        }
+    }
+
+    fn aux_getters_may_need_registration(&mut self, getters: Vec<Id<Getter>>) {
+        let mut per_adapter = HashMap::new();
+        for id in getters {
+            match self.getter_by_id.get_mut(&id) {
+                None => {
+                    debug_assert!(false, "I have just added/modified getter {:?} but I can't \
+                                            find it anymore", id);
+                    // FIXME: Logging would be nice.
+                },
+                Some(mut getter_data) => {
+                    // Determine if the channel matches an ongoing watcher.
+                    for watcher in &mut self.watchers.lock().unwrap().watchers.values() {
+                        for &(ref selectors, ref filter) in &watcher.watch {
+                            let matches = selectors.iter().find(|selector| {
+                                getter_data.matches(selector)
+                            }).is_some();
+                            if !matches {
+                                // The channel doesn't match this watcher.
+                                continue;
+                            }
+
+                            // Inform of topology change.
+                            let on_event = &watcher.on_event;
+                            let _ = on_event.send(WatchEvent::GetterAdded(id.clone()));
+
+                            // Register to be informed of future changes.
+                            Self::aux_channel_watch_per_chan(&mut watcher.clone(), &mut getter_data, filter, &mut per_adapter)
+                        }
+                    }
+                }
+            }
+        }
+
+        self.aux_register_watch_per_adapter(per_adapter)
     }
 
     /*
@@ -369,6 +474,10 @@ impl AdapterManagerState {
 
 }
 
+/// Instructions sent from the AdapterManager to the AdapterManagerState.
+///
+/// Most of these instructions have a callback used to inform the AdapterManager that execution
+/// is complete.
 pub enum Op {
     AddAdapter {
         adapter: Box<Adapter>,
@@ -455,10 +564,10 @@ pub enum Op {
     RegisterChannelWatch {
         watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
         on_event: Box<ExtSender<WatchEvent>>,
-        tx: RawSender<(Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>)>
+        tx: RawSender<(WatchKey, Arc<AtomicBool>)>
     },
     UnregisterChannelWatch {
-        key: usize
+        key: WatchKey
     },
 }
 
@@ -666,45 +775,38 @@ impl AdapterManagerState {
     /// registered, or a channel with the same identifier is already registered.
     /// In either cases, this method reverts all its changes.
     fn add_getter(&mut self, getter: Channel<Getter>) -> Result<(), Error> {
-        let getter_by_id = &mut self.getter_by_id;
-        let service = match self.service_by_id.get_mut(&getter.service) {
-            None => return Err(Error::InternalError(InternalError::NoSuchService(getter.service.clone()))),
-            Some(service) => service
-        };
-        if service.borrow().adapter != getter.adapter {
-            return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), getter.adapter.clone())));
+        let id = getter.id.clone();
+        {
+            let getter_by_id = &mut self.getter_by_id;
+            let service = match self.service_by_id.get_mut(&getter.service) {
+                None => return Err(Error::InternalError(InternalError::NoSuchService(getter.service.clone()))),
+                Some(service) => service
+            };
+            if service.borrow().adapter != getter.adapter {
+                return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), getter.adapter.clone())));
+            }
+            let getters = &mut service.borrow_mut().getters;
+
+            let insert_in_service = match InsertInMap::start(getters, vec![(getter.id.clone(), getter.clone())]) {
+                Ok(transaction) => transaction,
+                Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
+            };
+
+            let getter_data = GetterData::new(getter);
+            let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
+                Ok(transaction) => transaction,
+                Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
+            };
+
+            insert_in_service.commit();
+            insert_in_getters.commit();
         }
-        let getters = &mut service.borrow_mut().getters;
 
-        let insert_in_service = match InsertInMap::start(getters, vec![(getter.id.clone(), getter.clone())]) {
-            Ok(transaction) => transaction,
-            Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
-        };
-
-        /*
-                // FIXME: Check whether we match an ongoing watcher.
-                for watcher in &mut watchers.lock().unwrap().watchers.values() {
-                    let matches = watcher.selectors.iter().find(|selector| {
-                        getter_data.matches(selector)
-                    }).is_some();
-                    if matches {
-                        getter_data.watchers.insert(watcher.clone());
-                        watcher.push_getter(&getter_data.id);
-                        // FIXME: Notify WatchEvent of topology change
-                        // FIXME: register_single_channel_watch_values
-                    };
-                }
-        */
-        let getter_data = GetterData::new(getter);
-        let insert_in_getters = match InsertInMap::start(getter_by_id, vec![(getter_data.id.clone(), getter_data)]) {
-            Ok(transaction) => transaction,
-            Err(id) => return Err(Error::InternalError(InternalError::DuplicateGetter(id)))
-        };
-
-        insert_in_service.commit();
-        insert_in_getters.commit();
+        self.aux_getters_may_need_registration(vec![id]);
         Ok(())
     }
+
+
 
     /// Remove a setter previously registered on the system. Typically, called by
     /// an adapter when a service is reconfigured to remove one of its setters.
@@ -715,10 +817,11 @@ impl AdapterManagerState {
     /// is not registered. In either case, it attemps to clean as much as possible, even
     /// if the state is inconsistent.
     fn remove_getter(&mut self, id: Id<Getter>) -> Result<(), Error> {
-        let getter = match self.getter_by_id.remove(&id) {
+        let mut getter = match self.getter_by_id.remove(&id) {
             None => return Err(Error::InternalError(InternalError::NoSuchGetter(id))),
             Some(getter) => getter
         };
+        Self::aux_getter_may_need_unregistration(&mut getter);
         match self.service_by_id.get_mut(&getter.getter.service) {
             None => Err(Error::InternalError(InternalError::NoSuchService(getter.getter.service))),
             Some(service) => {
@@ -836,16 +939,40 @@ impl AdapterManagerState {
 
 
     fn add_getter_tags(&mut self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
-        Self::aux_add_channel_tags(selectors, tags, &mut self.getter_by_id)
+        let mut result = 0;
+        let mut channels = vec![];
+        Self::with_channels_mut(selectors, &mut self.getter_by_id, |mut data| {
+            channels.push(data.id.clone());
+            data.insert_tags(&tags);
+            result += 1;
+        });
+        self.aux_getters_may_need_registration(channels);
+        result
     }
     fn add_setter_tags(&mut self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
-        Self::aux_add_channel_tags(selectors, tags, &mut self.setter_by_id)
+        let mut result = 0;
+        Self::with_channels_mut(selectors, &mut self.setter_by_id, |mut data| {
+            data.insert_tags(&tags);
+            result += 1;
+        });
+        result
     }
     fn remove_getter_tags(&mut self, selectors: Vec<GetterSelector>, tags: Vec<Id<TagId>>) -> usize {
-        Self::aux_remove_channel_tags(selectors, tags, &mut self.getter_by_id)
+        let mut result = 0;
+        Self::with_channels_mut(selectors, &mut self.getter_by_id, |mut data| {
+            data.remove_tags(&tags);
+            Self::aux_getter_may_need_unregistration(&mut data);
+            result += 1;
+        });
+        result
     }
     fn remove_setter_tags(&mut self, selectors: Vec<SetterSelector>, tags: Vec<Id<TagId>>) -> usize {
-        Self::aux_remove_channel_tags(selectors, tags, &mut self.setter_by_id)
+        let mut result = 0;
+        Self::with_channels_mut(selectors, &mut self.setter_by_id, |mut data| {
+            data.remove_tags(&tags);
+            result += 1;
+        });
+        result
     }
 
     /// Read the latest value from a set of channels
@@ -914,14 +1041,34 @@ impl AdapterManagerState {
         results
     }
 
+    fn aux_channel_watch_per_chan(watcher: &mut Arc<WatcherData>,
+        getter_data: &mut GetterData,
+        filter: &Exactly<Range>,
+        per_adapter: &mut WatcherPerAdapter) {
+        use std::collections::hash_map::Entry::*;
+        getter_data.watchers.insert(watcher.key, watcher.clone());
 
-    fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> (Box<ExtSender<WatchEvent>>, usize, Arc<AtomicBool>) {
+        let range = match *filter {
+            Exactly::Exactly(ref range) => Some(range.clone()),
+            Exactly::Always => None,
+            _ => return // Don't watch data, just topology.
+        };
+
+        let data = (getter_data.id.clone(), range);
+        let adapter = getter_data.adapter.clone();
+        match per_adapter.entry(adapter) {
+            Vacant(entry) => {
+                entry.insert((vec![data], watcher.clone()));
+            },
+            Occupied(mut entry) => entry.get_mut().0.push(data),
+        }
+    }
+
+    fn register_channel_watch(&mut self, mut watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>, on_event: Box<ExtSender<WatchEvent>>) -> (WatchKey, Arc<AtomicBool>) {
         // Store the watcher. This will serve when we new channels are added, to hook them up
         // to this watcher.
-        let is_dropped = Arc::new(AtomicBool::new(false));
-        let watcher = self.watchers.lock().unwrap().create(watch.clone(),
-            &is_dropped, on_event.clone());
-        let key = watcher.key;
+        let mut watcher = self.watchers.lock().unwrap().create(watch.clone(), on_event.clone());
+        let is_dropped = watcher.is_dropped.clone();
 
         // Regroup per adapter.
         let mut per_adapter = HashMap::new();
@@ -931,100 +1078,39 @@ impl AdapterManagerState {
             // the watcher immediately.
             let filter = &filter;
             Self::with_channels_mut(selectors, &mut self.getter_by_id, |mut getter_data| {
-                use std::collections::hash_map::Entry::*;
-                getter_data.watchers.insert(watcher.clone());
-                watcher.push_getter(&getter_data.id);
-
-                let range = match *filter {
-                    Exactly::Exactly(ref range) => Some(range.clone()),
-                    Exactly::Always => None,
-                    _ => return // Don't watch data, just topology.
-                };
-
-                let data = (getter_data.id.clone(), range);
-                let adapter = getter_data.adapter.clone();
-                match per_adapter.entry(adapter) {
-                    Vacant(entry) => {
-                        entry.insert(vec![data]);
-                    },
-                    Occupied(mut entry) => entry.get_mut().push(data),
-                }
+                Self::aux_channel_watch_per_chan(&mut watcher, &mut getter_data, filter, &mut per_adapter)
             });
         }
 
-        // Now dispatch to adapters.
-        for (adapter_id, request) in per_adapter.drain() {
-            let adapter = match self.adapter_by_id.get(&adapter_id) {
-                None => {
-                    debug_assert!(false, "We have a registered channel whose adapter is not registered: {:?}", adapter_id);
-                    // FIXME: Logging would be nice.
-                    continue
-                },
-                Some(adapter) => adapter
-            };
-
-            let is_dropped = is_dropped.clone();
-            let on_err = on_event.clone();
-            let on_ok = on_event.filter_map(move |event| {
-                if is_dropped.load(Ordering::Relaxed) {
-                    return None;
-                }
-                Some(match event {
-                    AdapterWatchEvent::Enter { id, value } =>
-                        WatchEvent::EnterRange {
-                            from: id,
-                            value: value
-                        },
-                    AdapterWatchEvent::Exit { id, value } =>
-                        WatchEvent::ExitRange {
-                            from: id,
-                            value: value
-                        },
-                })
-            });
-
-            let watcher = watcher.clone();
-            for (id, result) in adapter.register_watch(request, Box::new(on_ok)) {
-                match result {
-                    Err(err) => {
-                        let event = WatchEvent::InitializationError {
-                            channel: id.clone(),
-                            error: err
-                        };
-                        let _ = on_err.send(event);
-                    },
-                    Ok(guard) => watcher.push_guard(guard)
-                }
-            }
-        }
+        self.aux_register_watch_per_adapter(per_adapter);
 
         // Upon drop, this data structure will immediately drop `is_dropped` and then dispatch
         // `unregister_channel_watch` to unregister everything else.
-        (on_event, key, is_dropped)
+        (watcher.key, is_dropped)
     }
 
     /// Unregister a watch previously registered with `register_channel_watch`.
     ///
     /// This method is dispatched from `WatchGuard::drop()`.
-    pub fn unregister_channel_watch(&mut self, key: usize) { // FIXME: Use a better type than `usize`
+    pub fn unregister_channel_watch(&mut self, key: WatchKey) { // FIXME: Use a better type than `usize`
         // Remove `key` from `watchers`. This will prevent the watcher from being registered
         // automatically with any new getter.
         let mut watcher_data = match self.watchers.lock().unwrap().remove(key) {
             None => {
-                debug_assert!(false, "Attempting to unregister a watcher that has already been removed {}", key);
+                debug_assert!(false, "Attempting to unregister a watcher that has already been removed {:?}", key);
                 return
             } // FIXME: Logging would be nice.
             Some(watcher_data) => watcher_data
         };
 
         // Remove the watcher from all getters.
-        for getter_id in watcher_data.getters.borrow().iter() {
+        for getter_id in watcher_data.guards.borrow().keys() {
             let mut getter = match self.getter_by_id.get_mut(getter_id) {
                 None => return, // Race condition between removing the getter and dropping the watcher.
                 Some(getter) => getter
             };
-            if !getter.watchers.remove(&watcher_data) {
-                debug_assert!(false, "Attempting to unregister a watcher that has already been removed from its getter {}, {:?}", key, getter_id);
+            if getter.watchers.remove(&watcher_data.key).is_none() {
+                debug_assert!(false, "Attempting to unregister a watcher that has already been removed from its getter {:?}, {:?}", key, getter_id);
             }
         }
 
