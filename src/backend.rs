@@ -272,6 +272,12 @@ impl AdapterManagerState {
 
     fn with_services<F>(&self, selectors: Vec<ServiceSelector>, mut cb: F) where F: FnMut(&Rc<RefCell<Service>>) {
         for service in self.service_by_id.values() {
+            // All services match when we have no selectors.
+            if selectors.is_empty() {
+                cb(service);
+                continue;
+            }
+
             let matches = selectors.iter().find(|selector| {
                 selector.matches(&*service.borrow())
             }).is_some();
