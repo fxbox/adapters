@@ -4,7 +4,7 @@ extern crate transformable_channels;
 
 use foxbox_adapters::adapter::*;
 use foxbox_adapters::manager::*;
-use foxbox_taxonomy::api::{ API, Error, InternalError, ResultMap };
+use foxbox_taxonomy::api::{ API, Error, InternalError };
 use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
@@ -148,8 +148,8 @@ impl Adapter for TestAdapter {
 #[test]
 fn test_add_remove_adapter() {
     let manager = AdapterManager::new();
-    let id_1 = Id::new("id 1".to_owned());
-    let id_2 = Id::new("id 2".to_owned());
+    let id_1 = Id::new("id 1");
+    let id_2 = Id::new("id 2");
 
     println!("* Adding two distinct test adapters should work.");
     manager.add_adapter(Box::new(TestAdapter::new(&id_1))).unwrap();
@@ -186,22 +186,22 @@ fn test_add_remove_adapter() {
 fn test_add_remove_services() {
     println!("");
     let manager = AdapterManager::new();
-    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
-    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
-    let id_3 = Id::<AdapterId>::new("adapter id 3".to_owned());
+    let id_1 = Id::<AdapterId>::new("adapter id 1");
+    let id_2 = Id::<AdapterId>::new("adapter id 2");
+    let id_3 = Id::<AdapterId>::new("adapter id 3");
 
 
-    let getter_id_1 = Id::<Getter>::new("getter id 1".to_owned());
-    let getter_id_2 = Id::<Getter>::new("getter id 2".to_owned());
-    let getter_id_3 = Id::<Getter>::new("getter id 3".to_owned());
+    let getter_id_1 = Id::<Getter>::new("getter id 1");
+    let getter_id_2 = Id::<Getter>::new("getter id 2");
+    let getter_id_3 = Id::<Getter>::new("getter id 3");
 
-    let setter_id_1 = Id::<Setter>::new("setter id 1".to_owned());
-    let setter_id_2 = Id::<Setter>::new("setter id 2".to_owned());
-    let setter_id_3 = Id::<Setter>::new("setter id 3".to_owned());
+    let setter_id_1 = Id::<Setter>::new("setter id 1");
+    let setter_id_2 = Id::<Setter>::new("setter id 2");
+    let setter_id_3 = Id::<Setter>::new("setter id 3");
 
-    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
-    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
-    let service_id_3 = Id::<ServiceId>::new("service id 3".to_owned());
+    let service_id_1 = Id::<ServiceId>::new("service id 1");
+    let service_id_2 = Id::<ServiceId>::new("service id 2");
+    let service_id_3 = Id::<ServiceId>::new("service id 3");
 
     let getter_1 = Channel {
         id: getter_id_1.clone(),
@@ -499,17 +499,17 @@ fn test_add_remove_services() {
 fn test_add_remove_tags() {
     println!("");
     let manager = AdapterManager::new();
-    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
-    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
+    let id_1 = Id::<AdapterId>::new("adapter id 1");
+    let id_2 = Id::<AdapterId>::new("adapter id 2");
 
-    let getter_id_1 = Id::<Getter>::new("getter id 1".to_owned());
-    let getter_id_2 = Id::<Getter>::new("getter id 2".to_owned());
+    let getter_id_1 = Id::<Getter>::new("getter id 1");
+    let getter_id_2 = Id::<Getter>::new("getter id 2");
 
-    let setter_id_1 = Id::<Setter>::new("setter id 1".to_owned());
-    let setter_id_2 = Id::<Setter>::new("setter id 2".to_owned());
+    let setter_id_1 = Id::<Setter>::new("setter id 1");
+    let setter_id_2 = Id::<Setter>::new("setter id 2");
 
-    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
-    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
+    let service_id_1 = Id::<ServiceId>::new("service id 1");
+    let service_id_2 = Id::<ServiceId>::new("service id 2");
 
     let getter_1 = Channel {
         id: getter_id_1.clone(),
@@ -583,9 +583,9 @@ fn test_add_remove_tags() {
         setters: HashMap::new(),
     };
 
-    let tag_1 = Id::<TagId>::new("tag_1".to_owned());
-    let tag_2 = Id::<TagId>::new("tag_2".to_owned());
-    let tag_3 = Id::<TagId>::new("tag_3".to_owned());
+    let tag_1 = Id::<TagId>::new("tag_1");
+    let tag_2 = Id::<TagId>::new("tag_2");
+    let tag_3 = Id::<TagId>::new("tag_3");
 
     println!("* Initially, there are no tags.");
     assert_eq!(manager.get_services(vec![ServiceSelector::new().with_tags(vec![tag_1.clone()])]).len(), 0);
@@ -852,17 +852,17 @@ fn test_add_remove_tags() {
 fn test_fetch() {
     println!("");
     let manager = AdapterManager::new();
-    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
-    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
+    let id_1 = Id::<AdapterId>::new("adapter id 1");
+    let id_2 = Id::<AdapterId>::new("adapter id 2");
 
 
-    let getter_id_1_1 = Id::<Getter>::new("getter id 1.1".to_owned());
-    let getter_id_1_2 = Id::<Getter>::new("getter id 1.2".to_owned());
-    let getter_id_1_3 = Id::<Getter>::new("getter id 1.3".to_owned());
-    let getter_id_2 = Id::<Getter>::new("getter id 2".to_owned());
+    let getter_id_1_1 = Id::<Getter>::new("getter id 1.1");
+    let getter_id_1_2 = Id::<Getter>::new("getter id 1.2");
+    let getter_id_1_3 = Id::<Getter>::new("getter id 1.3");
+    let getter_id_2 = Id::<Getter>::new("getter id 2");
 
-    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
-    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
+    let service_id_1 = Id::<ServiceId>::new("service id 1");
+    let service_id_2 = Id::<ServiceId>::new("service id 2");
 
     let getter_1_1 = Channel {
         id: getter_id_1_1.clone(),
@@ -958,9 +958,7 @@ fn test_fetch() {
     manager.add_getter(getter_1_2.clone()).unwrap();
     manager.add_getter(getter_1_3.clone()).unwrap();
     manager.add_getter(getter_2.clone()).unwrap();
-    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 4);
-    let data : HashMap<_, _> = data.drain(..).collect();
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
 
     for result in data.values() {
@@ -974,10 +972,7 @@ fn test_fetch() {
     println!("* Fetching values returns the right values.");
     tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On))))).unwrap();
     tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off))))).unwrap();
-    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
-    let data : HashMap<_, _> = data
-        .drain(..)
-        .collect();
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Ok(Some(Value::OnOff(OnOff::On)))) => {},
@@ -998,10 +993,7 @@ fn test_fetch() {
 
     println!("* Fetching values returns the right errors.");
     tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone()))))).unwrap();
-    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
-    let data : HashMap<_, _> = data
-        .drain(..)
-        .collect();
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Err(Error::InternalError(InternalError::NoSuchGetter(ref id)))) if *id == getter_id_1_1 => {},
@@ -1022,10 +1014,7 @@ fn test_fetch() {
 
     println!("* Fetching a value that causes an internal type error returns that error.");
     tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open))))).unwrap();
-    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
-    let data : HashMap<_, _> = data
-        .drain(..)
-        .collect();
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Err(Error::TypeError(TypeError {
@@ -1056,16 +1045,16 @@ fn test_fetch() {
 fn test_send() {
     println!("");
     let manager = AdapterManager::new();
-    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
-    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
+    let id_1 = Id::<AdapterId>::new("adapter id 1");
+    let id_2 = Id::<AdapterId>::new("adapter id 2");
 
-    let setter_id_1_1 = Id::<Setter>::new("setter id 1.1".to_owned());
-    let setter_id_1_2 = Id::<Setter>::new("setter id 1.2".to_owned());
-    let setter_id_1_3 = Id::<Setter>::new("setter id 1.3".to_owned());
-    let setter_id_2 = Id::<Setter>::new("setter id 2".to_owned());
+    let setter_id_1_1 = Id::<Setter>::new("setter id 1.1");
+    let setter_id_1_2 = Id::<Setter>::new("setter id 1.2");
+    let setter_id_1_3 = Id::<Setter>::new("setter id 1.3");
+    let setter_id_2 = Id::<Setter>::new("setter id 2");
 
-    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
-    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
+    let service_id_1 = Id::<ServiceId>::new("service id 1");
+    let service_id_2 = Id::<ServiceId>::new("service id 2");
 
     let setter_1_1 = Channel {
         id: setter_id_1_1.clone(),
@@ -1159,8 +1148,7 @@ fn test_send() {
     manager.add_setter(setter_1_3.clone()).unwrap();
     manager.add_setter(setter_2.clone()).unwrap();
 
-    let mut data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
-    let data : HashMap<_, _> = data.drain(..).collect();
+    let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
     assert_eq!(data.len(), 4);
     for result in data.values() {
         if let Ok(()) = *result {
@@ -1190,7 +1178,7 @@ fn test_send() {
     assert!(rx_adapter_2.try_recv().is_err());
 
     println!("* Sending ill-typed values to channels will cause type errors.");
-    let mut data = manager.send_values(vec![
+    let data = manager.send_values(vec![
         (vec![
             SetterSelector::new().with_id(setter_id_1_1.clone()),
             SetterSelector::new().with_id(setter_id_1_2.clone()),
@@ -1200,8 +1188,6 @@ fn test_send() {
             SetterSelector::new().with_id(setter_id_1_3.clone()).clone()
         ], Value::OnOff(OnOff::On))
     ]);
-
-    let data : HashMap<_, _> = data.drain(..).collect();
     assert_eq!(data.len(), 4);
     for id in vec![&setter_id_1_1, &setter_id_1_2, &setter_id_2] {
         match data.get(id) {
@@ -1229,9 +1215,7 @@ fn test_send() {
 
     println!("* Sending values that cause channel errors will cause propagate the errors.");
     tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), Some(Error::InternalError(InternalError::InvalidInitialService)))).unwrap();
-    let mut data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
-
-    let data : HashMap<_, _> = data.drain(..).collect();
+    let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
     assert_eq!(data.len(), 4);
     for id in vec![&setter_id_2, &setter_id_1_2, &setter_id_2] {
         match data.get(id) {
@@ -1263,7 +1247,6 @@ fn test_send() {
     tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), None)).unwrap();
 
     // FIXME: What happens if we send several times to the same setter?
-
 
     println!("");
 }

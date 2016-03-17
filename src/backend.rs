@@ -1,9 +1,9 @@
 //! An API for plugging in adapters.
 
-use adapter::{ Adapter, AdapterWatchGuard, WatchEvent as AdapterWatchEvent };
+use adapter::{ Adapter, AdapterWatchGuard, ResultMap, WatchEvent as AdapterWatchEvent };
 use transact::InsertInMap;
 
-use foxbox_taxonomy::api::{ API, Error, InternalError, WatchEvent, ResultMap };
+use foxbox_taxonomy::api::{ API, Error, InternalError, WatchEvent };
 use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
@@ -1087,7 +1087,7 @@ impl AdapterManagerState {
         });
 
         // Now fetch the values
-        let mut results = vec![];
+        let mut results = HashMap::new();
         for (adapter_id, mut getters) in per_adapter {
             match self.adapter_by_id.get(&adapter_id) {
                 None => {}, // Internal inconsistency. FIXME: Log this somewhere.
@@ -1097,7 +1097,7 @@ impl AdapterManagerState {
                         .adapter
                         .fetch_values(getters);
 
-                    let mut checked = got.drain(..)
+                    let checked = got.drain()
                         .zip(types.drain(..))
                         .map(|(result, typ)| {
                             if let (id, Ok(Some(value))) = result {
@@ -1112,9 +1112,9 @@ impl AdapterManagerState {
                             } else {
                                 result
                             }
-                        }).collect();
+                        });
 
-                    results.append(&mut checked);
+                    results.extend(checked);
                 }
             }
         }
@@ -1158,15 +1158,15 @@ impl AdapterManagerState {
 
 
         // Dispatch to adapter
-        let mut results = Vec::new();
-        for (adapter_id, (request, mut failures)) in per_adapter.drain() {
+        let mut results = HashMap::new();
+        for (adapter_id, (request, failures)) in per_adapter.drain() {
             let adapter = match self.adapter_by_id.get(&adapter_id) {
                 None => continue, // That's an internal inconsistency. FIXME: Log this somewhere.
                 Some(adapter) => adapter
             };
-            let mut got = adapter.adapter.send_values(request);
-            results.append(&mut got);
-            results.append(&mut failures);
+            let got = adapter.adapter.send_values(request);
+            results.extend(got);
+            results.extend(failures);
         }
 
         results

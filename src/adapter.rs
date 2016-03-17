@@ -1,9 +1,13 @@
-use foxbox_taxonomy::api::{ Error, ResultMap };
+use foxbox_taxonomy::api::Error;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
 use foxbox_taxonomy::values::*;
 
 use transformable_channels::mpsc::*;
+
+use std::collections::HashMap;
+
+pub type ResultMap<K, T, E> = HashMap<K, Result<T, E>>;
 
 /// A witness that we are currently watching for a value.
 /// Watching stops when the guard is dropped.
