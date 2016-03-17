@@ -1203,7 +1203,7 @@ fn test_send() {
         other => panic!("Unexpected result for {:?}: {:?}", setter_id_1_3, other)
     }
 
-    println!("* All the weill-typed values should have been received.");
+    println!("* All the well-typed values should have been received.");
     match rx_adapter_1.try_recv().unwrap() {
         Effect::ValueSent(ref id, Value::OnOff(OnOff::On)) if *id == setter_id_1_3 => {},
         effect => panic!("Unexpected effect {:?}", effect)
@@ -1214,8 +1214,10 @@ fn test_send() {
     assert!(rx_adapter_1.try_recv().is_err());
     assert!(rx_adapter_2.try_recv().is_err());
 
-    println!("* Sending values that cause channel errors will cause propagate the errors.");
+    println!("* Sending values that cause channel errors will propagate the errors.");
     tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), Some(Error::InternalError(InternalError::InvalidInitialService)))).unwrap();
+    std::thread::sleep(std::time::Duration::new(2, 0));
+
     let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
     assert_eq!(data.len(), 4);
     for id in vec![&setter_id_2, &setter_id_1_2, &setter_id_2] {
