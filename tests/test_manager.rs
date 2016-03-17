@@ -16,7 +16,6 @@ use std::cell::RefCell;
 use std::collections::{ HashMap, HashSet };
 use std::sync::{ Arc, Mutex };
 use std::thread;
-use std::sync::mpsc::{ sync_channel, SyncSender };
 
 enum TestOp {
     InjectGetterValue(Id<Getter>, Result<Option<Value>, Error>),
@@ -34,7 +33,7 @@ fn dup<T>(t: T) -> (T, T) where T: Clone {
 struct TestAdapter {
     id: Id<AdapterId>,
     name: String,
-    tx: SyncSender<TestOp>,
+    tweak: Arc<Fn(TestOp) + Sync + Send>,
     tx_effect: RawSender<Effect>,
     rx_effect: RefCell<Option<Receiver<Effect>>>,
     values: Arc<Mutex<HashMap<Id<Getter>, Result<Value, Error>>>>,
@@ -43,14 +42,14 @@ struct TestAdapter {
 
 impl TestAdapter {
     fn new(id: &Id<AdapterId>) -> Self {
-        let (tx, rx) = sync_channel(0);
+        let (tx, rx) : (RawSender<(TestOp, RawSender<()>)>, _) = channel();
         let (tx_effect, rx_effect) = channel();
 
         let (values_main, values_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
         let (senders_main, senders_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
         thread::spawn(move || {
             use self::TestOp::*;
-            for msg in rx {
+            for (msg, tx) in rx {
                 match msg {
                     InjectGetterValue(id, Ok(Some(value))) => {
                         values_thread.lock().unwrap().insert(id, Ok(value));
@@ -68,14 +67,21 @@ impl TestAdapter {
                         senders_thread.lock().unwrap().insert(id, err);
                     }
                 }
+                tx.send(()).unwrap();
             }
         });
+        let mutex = Arc::new(Mutex::new(tx));
+        let tweak = move |msg| {
+            let (tx, rx) = channel();
+            mutex.lock().unwrap().send((msg, tx)).unwrap();
+            rx.recv().unwrap();
+        };
         TestAdapter {
             id: id.clone(),
             name: id.as_atom().to_string().clone(),
             values: values_main,
             senders: senders_main,
-            tx: tx,
+            tweak: Arc::new(tweak),
             tx_effect: tx_effect,
             rx_effect: RefCell::new(Some(rx_effect))
         }
@@ -942,7 +948,7 @@ fn test_fetch() {
 
     let adapter_1 = TestAdapter::new(&id_1);
     let adapter_2 = TestAdapter::new(&id_2);
-    let tx_adapter_1 = adapter_1.tx.clone();
+    let tweak_1 = adapter_1.tweak.clone();
     println!("* Without adapters, fetching values from a selector that has no channels returns an empty vector.");
     assert_eq!(manager.fetch_values(vec![GetterSelector::new()]).len(), 0);
 
@@ -970,8 +976,8 @@ fn test_fetch() {
     }
 
     println!("* Fetching values returns the right values.");
-    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On))))).unwrap();
-    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off))))).unwrap();
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
     let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
@@ -992,7 +998,7 @@ fn test_fetch() {
     }
 
     println!("* Fetching values returns the right errors.");
-    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone()))))).unwrap();
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone())))));
     let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
@@ -1013,7 +1019,7 @@ fn test_fetch() {
     }
 
     println!("* Fetching a value that causes an internal type error returns that error.");
-    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open))))).unwrap();
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open)))));
     let data = manager.fetch_values(vec![GetterSelector::new()]);
     assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
@@ -1126,7 +1132,7 @@ fn test_send() {
 
     let adapter_1 = TestAdapter::new(&id_1);
     let adapter_2 = TestAdapter::new(&id_2);
-    let tx_adapter_1 = adapter_1.tx.clone();
+    let tweak_1 = adapter_1.tweak.clone();
     let rx_adapter_1 = adapter_1.take_rx();
     let rx_adapter_2 = adapter_2.take_rx();
 
@@ -1210,13 +1216,11 @@ fn test_send() {
     }
 
     println!("* No further value should have been received.");
-    std::thread::sleep(std::time::Duration::new(2, 0));
     assert!(rx_adapter_1.try_recv().is_err());
     assert!(rx_adapter_2.try_recv().is_err());
 
     println!("* Sending values that cause channel errors will propagate the errors.");
-    tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), Some(Error::InternalError(InternalError::InvalidInitialService)))).unwrap();
-    std::thread::sleep(std::time::Duration::new(2, 0));
+    tweak_1(TestOp::InjectSetterError(setter_id_1_1.clone(), Some(Error::InternalError(InternalError::InvalidInitialService))));
 
     let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
     assert_eq!(data.len(), 4);
@@ -1249,9 +1253,7 @@ fn test_send() {
     println!("* No further value should have been received.");
     assert!(rx_adapter_1.try_recv().is_err());
     assert!(rx_adapter_2.try_recv().is_err());
-    tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), None)).unwrap();
-
-    // FIXME: What happens if we send several times to the same setter?
+    tweak_1(TestOp::InjectSetterError(setter_id_1_1.clone(), None));
 
     println!("");
 }
