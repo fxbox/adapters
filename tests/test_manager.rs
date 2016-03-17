@@ -1224,7 +1224,7 @@ fn test_send() {
         }
     }
 
-    for id in vec[&setter_id_1_1] {
+    for id in vec![&setter_id_1_1] {
         match data.get(id) {
             Some(&Err(Error::InternalError(InternalError::InvalidInitialService))) => {},
             other => panic!("Unexpected result for {:?}: {:?}", id, other)
