@@ -1066,27 +1066,45 @@ impl AdapterManagerState {
         Self::with_channels(selectors, &self.getter_by_id, |data| {
             use std::collections::hash_map::Entry::*;
             let id = data.channel.id.clone();
+            let typ = data.channel.mechanism.kind.get_type();
             match per_adapter.entry(data.adapter.clone()) {
                 Vacant(entry) => {
-                    entry.insert(vec![id]);
+                    entry.insert(vec![(id, typ)]);
                 }
                 Occupied(mut entry) => {
-                    entry.get_mut().push(id);
+                    entry.get_mut().push((id, typ));
                 }
             }
         });
 
         // Now fetch the values
         let mut results = vec![];
-        for (adapter_id, getters) in per_adapter {
+        for (adapter_id, mut getters) in per_adapter {
             match self.adapter_by_id.get(&adapter_id) {
                 None => {}, // Internal inconsistency. FIXME: Log this somewhere.
                 Some(ref adapter_data) => {
+                    let (getters, mut types) : (Vec<_>, Vec<_>) = getters.drain(..).unzip();
                     let mut got = adapter_data
                         .adapter
                         .fetch_values(getters);
+                    let mut checked = got.drain(..)
+                        .zip(types.drain(..))
+                        .map(|(result, typ)| {
+                            if let (id, Ok(Some(value))) = result {
+                                if value.get_type() == typ {
+                                    (id, Ok(Some(value)))
+                                } else {
+                                    (id, Err(Error::TypeError(TypeError {
+                                        expected: typ,
+                                        got: value.get_type()
+                                    })))
+                                }
+                            } else {
+                                result
+                            }
+                        }).collect();
 
-                    results.append(&mut got);
+                    results.append(&mut checked);
                 }
             }
         }

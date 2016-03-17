@@ -13,17 +13,48 @@ use foxbox_taxonomy::values::*;
 use transformable_channels::mpsc::*;
 
 use std::collections::{ HashMap, HashSet };
+use std::sync::{ Arc, Mutex };
+use std::thread;
+use std::sync::mpsc::{ sync_channel, SyncSender };
+
+enum TestOp {
+    InjectValue(Id<Getter>, Result<Option<Value>, Error>),
+}
 
 struct TestAdapter {
     id: Id<AdapterId>,
-    name: String
+    name: String,
+    tx: SyncSender<TestOp>,
+    values: Arc<Mutex<HashMap<Id<Getter>, Result<Value, Error>>>>,
 }
 
 impl TestAdapter {
     fn new(id: &Id<AdapterId>) -> Self {
+        let (tx, rx) = sync_channel(1);
+        let values = Arc::new(Mutex::new(HashMap::new()));
+        let values_2 = values.clone();
+        thread::spawn(move || {
+            use self::TestOp::*;
+            let values = values_2;
+            for msg in rx {
+                match msg {
+                    InjectValue(id, Ok(Some(value))) => {
+                        values.lock().unwrap().insert(id, Ok(value));
+                    },
+                    InjectValue(id, Err(error)) => {
+                        values.lock().unwrap().insert(id, Err(error));
+                    },
+                    InjectValue(id, Ok(None)) => {
+                        values.lock().unwrap().remove(&id);
+                    }
+                }
+            }
+        });
         TestAdapter {
             id: id.clone(),
-            name: id.as_atom().to_string().clone()
+            name: id.as_atom().to_string().clone(),
+            values: values,
+            tx: tx
         }
     }
 }
@@ -52,8 +83,16 @@ impl Adapter for TestAdapter {
 
     /// Request a value from a channel. The FoxBox (not the adapter)
     /// is in charge of keeping track of the age of values.
-    fn fetch_values(&self, set: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, Error> {
-        unimplemented!()
+    fn fetch_values(&self, mut channels: Vec<Id<Getter>>) -> ResultMap<Id<Getter>, Option<Value>, Error> {
+        let map = self.values.lock().unwrap();
+        channels.drain(..).map(|id| {
+            let result = match map.get(&id) {
+                None => Ok(None),
+                Some(&Ok(ref value)) => Ok(Some(value.clone())),
+                Some(&Err(ref error)) => Err(error.clone())
+            };
+            (id, result)
+        }).collect()
     }
 
     /// Request that a value be sent to a channel.
@@ -425,20 +464,15 @@ fn test_add_remove_tags() {
     let manager = AdapterManager::new();
     let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
     let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
-    let id_3 = Id::<AdapterId>::new("adapter id 3".to_owned());
-
 
     let getter_id_1 = Id::<Getter>::new("getter id 1".to_owned());
     let getter_id_2 = Id::<Getter>::new("getter id 2".to_owned());
-    let getter_id_3 = Id::<Getter>::new("getter id 3".to_owned());
 
     let setter_id_1 = Id::<Setter>::new("setter id 1".to_owned());
     let setter_id_2 = Id::<Setter>::new("setter id 2".to_owned());
-    let setter_id_3 = Id::<Setter>::new("setter id 3".to_owned());
 
     let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
     let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
-    let service_id_3 = Id::<ServiceId>::new("service id 3".to_owned());
 
     let getter_1 = Channel {
         id: getter_id_1.clone(),
@@ -773,6 +807,179 @@ fn test_add_remove_tags() {
             .with_id(setter_id_2.clone())
     ]);
     assert_eq!(selection.len(), 0);
+
+    println!("");
+}
+
+#[test]
+fn test_fetch() {
+    println!("");
+    let manager = AdapterManager::new();
+    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
+    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
+
+
+    let getter_id_1_1 = Id::<Getter>::new("getter id 1.1".to_owned());
+    let getter_id_1_2 = Id::<Getter>::new("getter id 1.2".to_owned());
+    let getter_id_1_3 = Id::<Getter>::new("getter id 1.3".to_owned());
+
+    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
+    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
+
+    let getter_1_1 = Channel {
+        id: getter_id_1_1.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_1_2 = Channel {
+        id: getter_id_1_2.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_1_3 = Channel {
+        id: getter_id_1_3.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let service_1 = Service {
+        id: service_id_1.clone(),
+        adapter: id_1.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let service_2 = Service {
+        id: service_id_2.clone(),
+        adapter: id_2.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let adapter_1 = TestAdapter::new(&id_1);
+    let adapter_2 = TestAdapter::new(&id_2);
+    let tx_adapter_1 = adapter_1.tx.clone();
+    println!("* Without adapters, fetching values from a selector that has no channels returns an empty vector.");
+    assert_eq!(manager.fetch_values(vec![GetterSelector::new()]).len(), 0);
+
+    println!("* With adapters, fetching values from a selector that has no channels returns an empty vector.");
+    manager.add_adapter(Box::new(adapter_1)).unwrap();
+    manager.add_adapter(Box::new(adapter_2)).unwrap();
+    manager.add_service(service_1.clone()).unwrap();
+    manager.add_service(service_2.clone()).unwrap();
+    assert_eq!(manager.fetch_values(vec![GetterSelector::new()]).len(), 0);
+
+    println!("* Fetching empty values from a selector that has channels returns a vector of empty values.");
+    manager.add_getter(getter_1_1.clone()).unwrap();
+    manager.add_getter(getter_1_2.clone()).unwrap();
+    manager.add_getter(getter_1_3.clone()).unwrap();
+    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
+    assert_eq!(data.len(), 3);
+    let data : HashMap<_, _> = data.drain(..).collect();
+    assert_eq!(data.len(), 3);
+
+    for result in data.values() {
+        if let Ok(None) = *result {
+            // We're good.
+        } else {
+            panic!("Unexpected result {:?}", result)
+        }
+    }
+
+    println!("* Fetching values returns the right values.");
+    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On))))).unwrap();
+    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off))))).unwrap();
+    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
+    let data : HashMap<_, _> = data
+        .drain(..)
+        .collect();
+    assert_eq!(data.len(), 3);
+    match data.get(&getter_id_1_1) {
+        Some(&Ok(Some(Value::OnOff(OnOff::On)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+
+    println!("* Fetching values returns the right errors.");
+    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone()))))).unwrap();
+    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
+    let data : HashMap<_, _> = data
+        .drain(..)
+        .collect();
+    assert_eq!(data.len(), 3);
+    match data.get(&getter_id_1_1) {
+        Some(&Err(Error::InternalError(InternalError::NoSuchGetter(ref id)))) if *id == getter_id_1_1 => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+
+    println!("* Fetching a value that causes an internal type error returns that error.");
+    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open))))).unwrap();
+    let mut data = manager.fetch_values(vec![GetterSelector::new()]);
+    let data : HashMap<_, _> = data
+        .drain(..)
+        .collect();
+    assert_eq!(data.len(), 3);
+    match data.get(&getter_id_1_1) {
+        Some(&Err(Error::TypeError(TypeError {
+            got: Type::OpenClosed,
+            expected: Type::OnOff,
+        }))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
 
     println!("");
 }
