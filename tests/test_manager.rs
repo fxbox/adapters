@@ -1210,6 +1210,7 @@ fn test_send() {
     }
 
     println!("* No further value should have been received.");
+    std::thread::sleep(std::time::Duration::new(2, 0));
     assert!(rx_adapter_1.try_recv().is_err());
     assert!(rx_adapter_2.try_recv().is_err());
 
