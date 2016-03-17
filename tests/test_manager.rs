@@ -129,9 +129,9 @@ impl Adapter for TestAdapter {
     }
 
     /// Request that a value be sent to a channel.
-    fn send_values(&self, mut values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
+    fn send_values(&self, mut values: HashMap<Id<Setter>, Value>) -> ResultMap<Id<Setter>, (), Error> {
         let map = self.senders.lock().unwrap();
-        values.drain(..).map(|(id, value)| {
+        values.drain().map(|(id, value)| {
             let result = match map.get(&id) {
                 None => {
                     self.tx_effect.send(Effect::ValueSent(id.clone(), value)).unwrap();

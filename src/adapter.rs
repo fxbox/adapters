@@ -156,7 +156,7 @@ pub trait Adapter: Send {
     ///
     /// The AdapterManager always attempts to group calls to `send_values` by `Adapter`, and then
     /// expects the adapter to attempt to minimize the connections with the actual devices.
-    fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error>;
+    fn send_values(&self, values: HashMap<Id<Setter>, Value>) -> ResultMap<Id<Setter>, (), Error>;
 
     /// Watch a bunch of getters as they change.
     ///
@@ -173,6 +173,14 @@ pub trait Adapter: Send {
     /// If no `Range` option is set, the watcher expects to receive `EnterRange` events whenever
     /// a new value is available on the device. The adapter may decide to reject the request if
     /// this is clearly not the expected usage for a device, or to throttle it.
+    ///
+    /// # Edge cases
+    ///
+    /// Note that the same `Id<Getter>` may appear several times. This is by design and adapters
+    /// should handle this case, optimizing it if possible.
+    ///
+    /// Similarly, successive calls to `register_watch` may end up watching the same getter. The
+    /// adapter should handle this case, optimizing it if possible.
     fn register_watch(&self, Vec<(Id<Getter>, Option<Range>)>,
         cb: Box<ExtSender<WatchEvent>>) ->
             ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>;

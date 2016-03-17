@@ -1140,16 +1140,27 @@ impl AdapterManagerState {
                 };
                 match per_adapter.entry(data.channel.adapter.clone()) {
                     Vacant(entry) => {
+                        let mut request = HashMap::new();
+                        let mut failures = HashMap::new();
                         match checked {
-                            Ok(value) => entry.insert((vec![(id, value)], vec![])),
-                            Err(error) => entry.insert((vec![], vec![(id, Err(error))]))
-                        };
+                            Ok(value) => {
+                                request.insert(id, value);
+                            }
+                            Err(error) => {
+                                failures.insert(id, Err(error));
+                            }
+                        }
+                        entry.insert((request, failures));
                     }
                     Occupied(mut entry) => {
-                        let &mut(ref mut request, ref mut failure) = entry.get_mut();
+                        let &mut(ref mut request, ref mut failures) = entry.get_mut();
                         match checked {
-                            Ok(value) => request.push((id, value)),
-                            Err(error) => failure.push((id, Err(error)))
+                            Ok(value) => {
+                                request.insert(id, value);
+                            }
+                            Err(error) => {
+                                failures.insert(id, Err(error));
+                            }
                         }
                     }
                 }
