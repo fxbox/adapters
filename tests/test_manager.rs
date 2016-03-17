@@ -12,40 +12,60 @@ use foxbox_taxonomy::values::*;
 
 use transformable_channels::mpsc::*;
 
+use std::cell::RefCell;
 use std::collections::{ HashMap, HashSet };
 use std::sync::{ Arc, Mutex };
 use std::thread;
 use std::sync::mpsc::{ sync_channel, SyncSender };
 
 enum TestOp {
-    InjectValue(Id<Getter>, Result<Option<Value>, Error>),
+    InjectGetterValue(Id<Getter>, Result<Option<Value>, Error>),
+    InjectSetterError(Id<Setter>, Option<Error>)
 }
 
+#[derive(Debug)]
+enum Effect {
+    ValueSent(Id<Setter>, Value)
+}
+
+fn dup<T>(t: T) -> (T, T) where T: Clone {
+    (t.clone(), t)
+}
 struct TestAdapter {
     id: Id<AdapterId>,
     name: String,
     tx: SyncSender<TestOp>,
+    tx_effect: RawSender<Effect>,
+    rx_effect: RefCell<Option<Receiver<Effect>>>,
     values: Arc<Mutex<HashMap<Id<Getter>, Result<Value, Error>>>>,
+    senders: Arc<Mutex<HashMap<Id<Setter>, Error>>>
 }
 
 impl TestAdapter {
     fn new(id: &Id<AdapterId>) -> Self {
-        let (tx, rx) = sync_channel(1);
-        let values = Arc::new(Mutex::new(HashMap::new()));
-        let values_2 = values.clone();
+        let (tx, rx) = sync_channel(0);
+        let (tx_effect, rx_effect) = channel();
+
+        let (values_main, values_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
+        let (senders_main, senders_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
         thread::spawn(move || {
             use self::TestOp::*;
-            let values = values_2;
             for msg in rx {
                 match msg {
-                    InjectValue(id, Ok(Some(value))) => {
-                        values.lock().unwrap().insert(id, Ok(value));
+                    InjectGetterValue(id, Ok(Some(value))) => {
+                        values_thread.lock().unwrap().insert(id, Ok(value));
                     },
-                    InjectValue(id, Err(error)) => {
-                        values.lock().unwrap().insert(id, Err(error));
+                    InjectGetterValue(id, Err(error)) => {
+                        values_thread.lock().unwrap().insert(id, Err(error));
                     },
-                    InjectValue(id, Ok(None)) => {
-                        values.lock().unwrap().remove(&id);
+                    InjectGetterValue(id, Ok(None)) => {
+                        values_thread.lock().unwrap().remove(&id);
+                    },
+                    InjectSetterError(id, None) => {
+                        senders_thread.lock().unwrap().remove(&id);
+                    },
+                    InjectSetterError(id, Some(err)) => {
+                        senders_thread.lock().unwrap().insert(id, err);
                     }
                 }
             }
@@ -53,9 +73,16 @@ impl TestAdapter {
         TestAdapter {
             id: id.clone(),
             name: id.as_atom().to_string().clone(),
-            values: values,
-            tx: tx
+            values: values_main,
+            senders: senders_main,
+            tx: tx,
+            tx_effect: tx_effect,
+            rx_effect: RefCell::new(Some(rx_effect))
         }
+    }
+
+    fn take_rx(&self) -> Receiver<Effect> {
+        self.rx_effect.borrow_mut().take().unwrap()
     }
 }
 
@@ -96,8 +123,18 @@ impl Adapter for TestAdapter {
     }
 
     /// Request that a value be sent to a channel.
-    fn send_values(&self, values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
-        unimplemented!()
+    fn send_values(&self, mut values: Vec<(Id<Setter>, Value)>) -> ResultMap<Id<Setter>, (), Error> {
+        let map = self.senders.lock().unwrap();
+        values.drain(..).map(|(id, value)| {
+            let result = match map.get(&id) {
+                None => {
+                    self.tx_effect.send(Effect::ValueSent(id.clone(), value)).unwrap();
+                    Ok(())
+                }
+                Some(error) => Err(error.clone())
+            };
+            (id, result)
+        }).collect()
     }
 
     fn register_watch(&self, sources: Vec<(Id<Getter>, Option<Range>)>,
@@ -822,6 +859,7 @@ fn test_fetch() {
     let getter_id_1_1 = Id::<Getter>::new("getter id 1.1".to_owned());
     let getter_id_1_2 = Id::<Getter>::new("getter id 1.2".to_owned());
     let getter_id_1_3 = Id::<Getter>::new("getter id 1.3".to_owned());
+    let getter_id_2 = Id::<Getter>::new("getter id 2".to_owned());
 
     let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
     let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
@@ -871,6 +909,21 @@ fn test_fetch() {
         },
     };
 
+    let getter_2 = Channel {
+        id: getter_id_2.clone(),
+        service: service_id_2.clone(),
+        adapter: id_2.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
     let service_1 = Service {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
@@ -904,10 +957,11 @@ fn test_fetch() {
     manager.add_getter(getter_1_1.clone()).unwrap();
     manager.add_getter(getter_1_2.clone()).unwrap();
     manager.add_getter(getter_1_3.clone()).unwrap();
+    manager.add_getter(getter_2.clone()).unwrap();
     let mut data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
     let data : HashMap<_, _> = data.drain(..).collect();
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
 
     for result in data.values() {
         if let Ok(None) = *result {
@@ -918,13 +972,13 @@ fn test_fetch() {
     }
 
     println!("* Fetching values returns the right values.");
-    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On))))).unwrap();
-    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off))))).unwrap();
+    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On))))).unwrap();
+    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off))))).unwrap();
     let mut data = manager.fetch_values(vec![GetterSelector::new()]);
     let data : HashMap<_, _> = data
         .drain(..)
         .collect();
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Ok(Some(Value::OnOff(OnOff::On)))) => {},
         other => panic!("Unexpected result, {:?}", other)
@@ -937,14 +991,18 @@ fn test_fetch() {
         Some(&Ok(None)) => {},
         other => panic!("Unexpected result, {:?}", other)
     }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
 
     println!("* Fetching values returns the right errors.");
-    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone()))))).unwrap();
+    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone()))))).unwrap();
     let mut data = manager.fetch_values(vec![GetterSelector::new()]);
     let data : HashMap<_, _> = data
         .drain(..)
         .collect();
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Err(Error::InternalError(InternalError::NoSuchGetter(ref id)))) if *id == getter_id_1_1 => {},
         other => panic!("Unexpected result, {:?}", other)
@@ -957,14 +1015,18 @@ fn test_fetch() {
         Some(&Ok(None)) => {},
         other => panic!("Unexpected result, {:?}", other)
     }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
 
     println!("* Fetching a value that causes an internal type error returns that error.");
-    tx_adapter_1.send(TestOp::InjectValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open))))).unwrap();
+    tx_adapter_1.send(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open))))).unwrap();
     let mut data = manager.fetch_values(vec![GetterSelector::new()]);
     let data : HashMap<_, _> = data
         .drain(..)
         .collect();
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
     match data.get(&getter_id_1_1) {
         Some(&Err(Error::TypeError(TypeError {
             got: Type::OpenClosed,
@@ -980,6 +1042,229 @@ fn test_fetch() {
         Some(&Ok(None)) => {},
         other => panic!("Unexpected result, {:?}", other)
     }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+
+    // FIXME: Should test fetching with tags.
 
     println!("");
 }
+
+#[test]
+fn test_send() {
+    println!("");
+    let manager = AdapterManager::new();
+    let id_1 = Id::<AdapterId>::new("adapter id 1".to_owned());
+    let id_2 = Id::<AdapterId>::new("adapter id 2".to_owned());
+
+    let setter_id_1_1 = Id::<Setter>::new("setter id 1.1".to_owned());
+    let setter_id_1_2 = Id::<Setter>::new("setter id 1.2".to_owned());
+    let setter_id_1_3 = Id::<Setter>::new("setter id 1.3".to_owned());
+    let setter_id_2 = Id::<Setter>::new("setter id 2".to_owned());
+
+    let service_id_1 = Id::<ServiceId>::new("service id 1".to_owned());
+    let service_id_2 = Id::<ServiceId>::new("service id 2".to_owned());
+
+    let setter_1_1 = Channel {
+        id: setter_id_1_1.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Setter {
+            kind: ChannelKind::OnOff,
+            updated: None,
+            push: None,
+        },
+    };
+
+    let setter_1_2 = Channel {
+        id: setter_id_1_2.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Setter {
+            kind: ChannelKind::OnOff,
+            updated: None,
+            push: None,
+        },
+    };
+
+    let setter_1_3 = Channel {
+        id: setter_id_1_3.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Setter {
+            kind: ChannelKind::OnOff,
+            updated: None,
+            push: None,
+        },
+    };
+
+    let setter_2 = Channel {
+        id: setter_id_2.clone(),
+        service: service_id_2.clone(),
+        adapter: id_2.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Setter {
+            kind: ChannelKind::OnOff,
+            updated: None,
+            push: None,
+        },
+    };
+
+    let service_1 = Service {
+        id: service_id_1.clone(),
+        adapter: id_1.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let service_2 = Service {
+        id: service_id_2.clone(),
+        adapter: id_2.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let adapter_1 = TestAdapter::new(&id_1);
+    let adapter_2 = TestAdapter::new(&id_2);
+    let tx_adapter_1 = adapter_1.tx.clone();
+    let rx_adapter_1 = adapter_1.take_rx();
+    let rx_adapter_2 = adapter_2.take_rx();
+
+    println!("* Without adapters, sending values to a selector that has no channels returns an empty vector.");
+    let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
+    assert_eq!(data.len(), 0);
+
+    println!("* With adapters, sending values to a selector that has no channels returns an empty vector.");
+    manager.add_adapter(Box::new(adapter_1)).unwrap();
+    manager.add_adapter(Box::new(adapter_2)).unwrap();
+    manager.add_service(service_1.clone()).unwrap();
+    manager.add_service(service_2.clone()).unwrap();
+    let data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
+    assert_eq!(data.len(), 0);
+
+    println!("* Sending well-typed values to channels succeeds if the adapter succeeds.");
+    manager.add_setter(setter_1_1.clone()).unwrap();
+    manager.add_setter(setter_1_2.clone()).unwrap();
+    manager.add_setter(setter_1_3.clone()).unwrap();
+    manager.add_setter(setter_2.clone()).unwrap();
+
+    let mut data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
+    let data : HashMap<_, _> = data.drain(..).collect();
+    assert_eq!(data.len(), 4);
+    for result in data.values() {
+        if let Ok(()) = *result {
+            // We're good.
+        } else {
+            panic!("Unexpected result {:?}", result)
+        }
+    }
+
+    println!("* All the values should have been received.");
+    let mut data = HashMap::new();
+    for _ in 0..3 {
+        let Effect::ValueSent(id, value) = rx_adapter_1.try_recv().unwrap();
+        data.insert(id, value);
+    }
+    assert_eq!(data.len(), 3);
+
+    let value = rx_adapter_2.recv().unwrap();
+    if let Effect::ValueSent(id, Value::OnOff(OnOff::On)) = value {
+        assert_eq!(id, setter_id_2);
+    } else {
+        panic!("Unexpected value {:?}", value)
+    }
+
+    println!("* No further value should have been received.");
+    assert!(rx_adapter_1.try_recv().is_err());
+    assert!(rx_adapter_2.try_recv().is_err());
+
+    println!("* Sending ill-typed values to channels will cause type errors.");
+    let mut data = manager.send_values(vec![
+        (vec![
+            SetterSelector::new().with_id(setter_id_1_1.clone()),
+            SetterSelector::new().with_id(setter_id_1_2.clone()),
+            SetterSelector::new().with_id(setter_id_2.clone()),
+        ], Value::OpenClosed(OpenClosed::Closed)),
+        (vec![
+            SetterSelector::new().with_id(setter_id_1_3.clone()).clone()
+        ], Value::OnOff(OnOff::On))
+    ]);
+
+    let data : HashMap<_, _> = data.drain(..).collect();
+    assert_eq!(data.len(), 4);
+    for id in vec![&setter_id_1_1, &setter_id_1_2, &setter_id_2] {
+        match data.get(id) {
+            Some(&Err(Error::TypeError(TypeError {
+                got: Type::OpenClosed,
+                expected: Type::OnOff
+            }))) => {},
+            other => panic!("Unexpected result for {:?}: {:?}", id, other)
+        }
+    }
+    match data.get(&setter_id_1_3) {
+        Some(&Ok(())) => {},
+        other => panic!("Unexpected result for {:?}: {:?}", setter_id_1_3, other)
+    }
+
+    println!("* All the weill-typed values should have been received.");
+    match rx_adapter_1.try_recv().unwrap() {
+        Effect::ValueSent(ref id, Value::OnOff(OnOff::On)) if *id == setter_id_1_3 => {},
+        effect => panic!("Unexpected effect {:?}", effect)
+    }
+
+    println!("* No further value should have been received.");
+    assert!(rx_adapter_1.try_recv().is_err());
+    assert!(rx_adapter_2.try_recv().is_err());
+
+    println!("* Sending values that cause channel errors will cause propagate the errors.");
+    tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), Some(Error::InternalError(InternalError::InvalidInitialService)))).unwrap();
+    let mut data = manager.send_values(vec![(vec![SetterSelector::new()], Value::OnOff(OnOff::On))]);
+
+    let data : HashMap<_, _> = data.drain(..).collect();
+    assert_eq!(data.len(), 4);
+    for id in vec![&setter_id_2, &setter_id_1_2, &setter_id_2] {
+        match data.get(id) {
+            Some(&Ok(())) => {},
+            other => panic!("Unexpected result for {:?}: {:?}", id, other)
+        }
+    }
+
+    match data.get(&setter_id_1_1) {
+        Some(&Err(Error::InternalError(InternalError::InvalidInitialService))) => {},
+        other => panic!("Unexpected result for {:?}: {:?}", setter_id_1_3, other)
+    }
+
+    println!("* All the non-errored values should have been received.");
+    for _ in 0..2 {
+        match rx_adapter_1.try_recv().unwrap() {
+            Effect::ValueSent(ref id, Value::OnOff(OnOff::On)) if *id != setter_id_1_1 => {},
+            effect => panic!("Unexpected effect {:?}", effect)
+        }
+    }
+    match rx_adapter_2.try_recv().unwrap() {
+        Effect::ValueSent(ref id, Value::OnOff(OnOff::On)) if *id == setter_id_2 => {},
+        effect => panic!("Unexpected effect {:?}", effect)
+    }
+
+    println!("* No further value should have been received.");
+    assert!(rx_adapter_1.try_recv().is_err());
+    assert!(rx_adapter_2.try_recv().is_err());
+    tx_adapter_1.send(TestOp::InjectSetterError(setter_id_1_1.clone(), None)).unwrap();
+
+    // FIXME: What happens if we send several times to the same setter?
+
+
+    println!("");
+}
+

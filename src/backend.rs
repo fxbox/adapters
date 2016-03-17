@@ -20,22 +20,31 @@ use std::rc::Rc;
 use std::sync::{ Arc, Mutex };
 use std::sync::atomic::{ AtomicBool, Ordering };
 
+/// Information on a service.
+///
+/// Used to build `Service` values.
 struct ServiceData {
+    /// The tags, as in a Service.
     tags: HashSet<Id<TagId>>,
+
+    /// The id, as in a `Service`.
     id: Id<ServiceId>,
+
+    /// Information on the getters. Used to build field `getters` of service.
     getters: HashMap<Id<Getter>, Rc<RefCell<GetterData>>>,
+
+    /// Information on the setters. Used to build field `getters` of service.
     setters: HashMap<Id<Setter>, Rc<RefCell<SetterData>>>,
+
+    /// The adapter, as in `Service`.
     adapter: Id<AdapterId>,
 }
 impl ServiceData {
-/*
-    fn get_getter<'a>(chan: &'a Rc<RefCell<GetterData>>) -> &'a Channel<Getter> {
-        &chan.deref().deref().borrow()
-    }
-    fn get_setter(chan: &Rc<RefCell<SetterData>>) -> &Channel<Setter> {
-        &chan.deref().deref().borrow()
-    }
-*/
+    /// Instantiate a `ServiceData` from a `Service`.
+    ///
+    /// # Warning
+    ///
+    /// Any `getters` or `setters` will be ignored!
     fn new(service: Service) -> Self {
         ServiceData {
             tags: service.tags,
@@ -1087,6 +1096,7 @@ impl AdapterManagerState {
                     let mut got = adapter_data
                         .adapter
                         .fetch_values(getters);
+
                     let mut checked = got.drain(..)
                         .zip(types.drain(..))
                         .map(|(result, typ)| {
@@ -1119,12 +1129,28 @@ impl AdapterManagerState {
             Self::with_channels(selectors, &self.setter_by_id, |data| {
                 use std::collections::hash_map::Entry::*;
                 let id = data.channel.id.clone();
+                let typ = data.channel.mechanism.kind.get_type();
+                let checked = if value.get_type() == typ {
+                    Ok(value.clone())
+                } else {
+                    Err(Error::TypeError(TypeError {
+                        got: value.get_type(),
+                        expected: typ
+                    }))
+                };
                 match per_adapter.entry(data.channel.adapter.clone()) {
                     Vacant(entry) => {
-                        entry.insert(vec![(id, value.clone())]);
+                        match checked {
+                            Ok(value) => entry.insert((vec![(id, value)], vec![])),
+                            Err(error) => entry.insert((vec![], vec![(id, Err(error))]))
+                        };
                     }
                     Occupied(mut entry) => {
-                        entry.get_mut().push((id, value.clone()));
+                        let &mut(ref mut request, ref mut failure) = entry.get_mut();
+                        match checked {
+                            Ok(value) => request.push((id, value)),
+                            Err(error) => failure.push((id, Err(error)))
+                        }
                     }
                 }
             })
@@ -1133,13 +1159,14 @@ impl AdapterManagerState {
 
         // Dispatch to adapter
         let mut results = Vec::new();
-        for (adapter_id, payload) in per_adapter.drain() {
+        for (adapter_id, (request, mut failures)) in per_adapter.drain() {
             let adapter = match self.adapter_by_id.get(&adapter_id) {
                 None => continue, // That's an internal inconsistency. FIXME: Log this somewhere.
                 Some(adapter) => adapter
             };
-            let mut got = adapter.adapter.send_values(payload);
+            let mut got = adapter.adapter.send_values(request);
             results.append(&mut got);
+            results.append(&mut failures);
         }
 
         results
