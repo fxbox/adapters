@@ -1224,9 +1224,11 @@ fn test_send() {
         }
     }
 
-    match data.get(&setter_id_1_1) {
-        Some(&Err(Error::InternalError(InternalError::InvalidInitialService))) => {},
-        other => panic!("Unexpected result for {:?}: {:?}", setter_id_1_3, other)
+    for id in vec[&setter_id_1_1] {
+        match data.get(id) {
+            Some(&Err(Error::InternalError(InternalError::InvalidInitialService))) => {},
+            other => panic!("Unexpected result for {:?}: {:?}", id, other)
+        }
     }
 
     println!("* All the non-errored values should have been received.");
