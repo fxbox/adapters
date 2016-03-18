@@ -1339,6 +1339,7 @@ fn test_watch() {
     let getter_id_1_1 = Id::<Getter>::new("getter id 1.1");
     let getter_id_1_2 = Id::<Getter>::new("getter id 1.2");
     let getter_id_1_3 = Id::<Getter>::new("getter id 1.3");
+    let getter_id_1_4 = Id::<Getter>::new("getter id 1.4");
     let getter_id_2 = Id::<Getter>::new("getter id 2");
 
     let service_id_1 = Id::<ServiceId>::new("service id 1");
@@ -1376,6 +1377,21 @@ fn test_watch() {
 
     let getter_1_3 = Channel {
         id: getter_id_1_3.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_1_4 = Channel {
+        id: getter_id_1_4.clone(),
         service: service_id_1.clone(),
         adapter: id_1.clone(),
         last_seen: None,
@@ -1462,7 +1478,7 @@ fn test_watch() {
     let guard = manager.watch_values(vec![(
         vec![GetterSelector::new()],
         Exactly::Always
-    )], Box::new(tx_watch));
+    )], Box::new(tx_watch)); // We keep `guard` out of `guards` to drop it manually later.
 
     manager.add_getter(getter_1_1.clone()).unwrap();
     manager.add_getter(getter_1_2.clone()).unwrap();
@@ -1515,125 +1531,110 @@ fn test_watch() {
     ], vec![tag_1.clone()]), 2);
 
     let (tx_watch_2, rx_watch_2) = channel();
-    let guard_2 = manager.watch_values(vec![(
+    guards.push(manager.watch_values(vec![(
         vec![
             GetterSelector::new()
                 .with_tags(vec![tag_1.clone()])
         ],
-        Exactly::Exactly(Range::Geq(Value::OnOff(OnOff::On)))
-    )], Box::new(tx_watch_2));
+        Exactly::Exactly(Range::Eq(Value::OnOff(OnOff::On)))
+    )], Box::new(tx_watch_2)));
 
     println!("* Value changes are observed on both watchers");
     tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
     tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
     tweak_1(TestOp::InjectGetterValue(getter_id_1_3.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
     tweak_2(TestOp::InjectGetterValue(getter_id_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
-    let mut events : HashMap<_, _> = (0..3).map(|i| {
-        println!("Waiting for observation {}", i);
+    tweak_2(TestOp::InjectGetterValue(getter_id_2.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+
+    let mut events : HashMap<_, _> = (0..4).map(|_| {
         match rx_watch.recv().unwrap() {
             Event::EnterRange { from, value } => (from, value),
             other => panic!("Unexpected event {:?}", other)
         }
     }).collect();
-    println!("Waiting for observation from other watch");
     match rx_watch_2.recv().unwrap() {
-        Event::ExitRange { from, value } => {
+        Event::EnterRange { from, value } => {
             events.insert(from, value);
         }
         other => panic!("Unexpected event {:?}", other)
     }
     assert_eq!(events.len(), 3);
+    assert!(rx_watch.try_recv().is_err());
+    assert!(rx_watch_2.try_recv().is_err());
 
-    println!("* We do not receive notifications anymore once we have dropped the guard.");
+    println!("* Watchers with ranges emit both EnterRange and ExitRange");
+
+    tweak_2(TestOp::InjectGetterValue(getter_id_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    match rx_watch_2.recv().unwrap() {
+        Event::ExitRange { ref from, .. } if *from == getter_id_2 => { }
+        other => panic!("Unexpected event {:?}", other)
+    }
+    match rx_watch.recv().unwrap() {
+        Event::EnterRange { ref from, .. } if *from == getter_id_2 => { }
+        other => panic!("Unexpected event {:?}", other)
+    }
+    assert!(rx_watch.try_recv().is_err());
+    assert!(rx_watch_2.try_recv().is_err());
+
+
+    println!("* We stop receiving value change notifications once we have dropped the guard.");
     drop(guard);
+    assert!(rx_watch.try_recv().is_err());
 
-    // FIXME: Implement.
-
-/*
-    println!("* Fetching empty values from a selector that has channels returns a vector of empty values.");
-    manager.add_getter(getter_1_1.clone()).unwrap();
-    manager.add_getter(getter_1_2.clone()).unwrap();
-    manager.add_getter(getter_1_3.clone()).unwrap();
-    manager.add_getter(getter_2.clone()).unwrap();
-    let data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 4);
-
-    for result in data.values() {
-        if let Ok(None) = *result {
-            // We're good.
-        } else {
-            panic!("Unexpected result {:?}", result)
-        }
-    }
-
-    println!("* Fetching values returns the right values.");
     tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
-    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
-    let data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 4);
-    match data.get(&getter_id_1_1) {
-        Some(&Ok(Some(Value::OnOff(OnOff::On)))) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_1_2) {
-        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_1_3) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_2) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_3.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_2(TestOp::InjectGetterValue(getter_id_2.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
 
-    println!("* Fetching values returns the right errors.");
-    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone())))));
-    let data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 4);
-    match data.get(&getter_id_1_1) {
-        Some(&Err(Error::InternalError(InternalError::NoSuchGetter(ref id)))) if *id == getter_id_1_1 => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_1_2) {
-        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_1_3) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_2) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
+    let events : HashSet<_> = (0..2).map(|_| {
+            match rx_watch_2.recv().unwrap() {
+                Event::EnterRange { from, .. } => from,
+                other => panic!("Unexpected event {:?}", other)
+            }
+    }).collect();
+    assert_eq!(events.len(), 2);
+    assert!(events.contains(&getter_id_1_3));
+    assert!(events.contains(&getter_id_2));
 
-    println!("* Fetching a value that causes an internal type error returns that error.");
-    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open)))));
-    let data = manager.fetch_values(vec![GetterSelector::new()]);
-    assert_eq!(data.len(), 4);
-    match data.get(&getter_id_1_1) {
-        Some(&Err(Error::TypeError(TypeError {
-            got: Type::OpenClosed,
-            expected: Type::OnOff,
-        }))) => {},
-        other => panic!("Unexpected result, {:?}", other)
+    assert!(rx_watch_2.try_recv().is_err());
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We stop receiving connection notifications once we have dropped the guard.");
+    manager.add_getter(getter_1_4.clone()).unwrap();
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We stop receiving disconnection notifications once we have dropped the guard.");
+    manager.remove_getter(&getter_id_1_4).unwrap();
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We are notified when a getter is added to a watch by changing a tag.");
+
+    assert_eq!(manager.add_getter_tags(vec![
+        GetterSelector::new().with_id(getter_id_1_1.clone()),
+        GetterSelector::new().with_id(getter_id_2.clone()),
+    ], vec![tag_1.clone()]), 2);
+    match rx_watch_2.recv().unwrap() {
+        Event::GetterAdded(ref id) if *id == getter_id_1_1 => { }
+        other => panic!("Unexpected event {:?}", other)
     }
-    match data.get(&getter_id_1_2) {
-        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
-        other => panic!("Unexpected result, {:?}", other)
+    assert!(rx_watch_2.try_recv().is_err());
+
+
+    println!("* We are notified when a getter is removed from a watch by changing a tag.");
+
+    assert_eq!(manager.remove_getter_tags(vec![
+        GetterSelector::new().with_id(getter_id_1_1.clone()),
+    ], vec![tag_1.clone()]), 1);
+    match rx_watch_2.recv().unwrap() {
+        Event::GetterRemoved(ref id) if *id == getter_id_1_1 => { }
+        other => panic!("Unexpected event {:?}", other)
     }
-    match data.get(&getter_id_1_3) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-    match data.get(&getter_id_2) {
-        Some(&Ok(None)) => {},
-        other => panic!("Unexpected result, {:?}", other)
-    }
-*/
-    // FIXME: Should test watching with tags.
+    assert!(rx_watch_2.try_recv().is_err());
+
+    println!("* Make sure that we havne't forgotten to eat a message.");
+    thread::sleep(std::time::Duration::new(1, 0));
+    assert!(rx_watch.try_recv().is_err());
+    assert!(rx_watch_2.try_recv().is_err());
 
     println!("");
 }
