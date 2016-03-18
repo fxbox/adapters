@@ -5,8 +5,8 @@ authors = ["David Rajchenbach-Teller <dteller@mozilla.com>"]
 
 [dependencies]
 clippy = "0.0.48"
-# foxbox_taxonomy = { git = "https://github.com/fxbox/taxonomy.git", rev = "1cc147b" }
-foxbox_taxonomy = { path = "../taxonomy" }
+foxbox_taxonomy = { git = "https://github.com/fxbox/taxonomy.git", rev = "9bd1d36" }
+# foxbox_taxonomy = { path = "../taxonomy" }
 serde = "0.6.13"
 serde_json = "0.6.0"
 serde_macros = "0.6.14"
