@@ -362,7 +362,7 @@ impl API for AdapterManager {
     }
 
     /// Watch for any change
-    fn register_channel_watch(&self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
+    fn watch_values(&self, watch: Vec<(Vec<GetterSelector>, Exactly<Range>)>,
         on_event: Box<ExtSender<WatchEvent>>) -> Self::WatchGuard
     {
         let (tx, rx) = channel();

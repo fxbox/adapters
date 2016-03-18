@@ -4,7 +4,7 @@ extern crate transformable_channels;
 
 use foxbox_adapters::adapter::*;
 use foxbox_adapters::manager::*;
-use foxbox_taxonomy::api::{ API, Error, InternalError };
+use foxbox_taxonomy::api::{ API, Error, InternalError, WatchEvent as Event };
 use foxbox_taxonomy::selector::*;
 use foxbox_taxonomy::services::*;
 use foxbox_taxonomy::util::*;
@@ -14,7 +14,9 @@ use transformable_channels::mpsc::*;
 
 use std::cell::RefCell;
 use std::collections::{ HashMap, HashSet };
+use std::collections::hash_map::Entry::*;
 use std::sync::{ Arc, Mutex };
+use std::sync::atomic::{ AtomicBool, Ordering} ;
 use std::thread;
 
 enum TestOp {
@@ -30,6 +32,15 @@ enum Effect {
 fn dup<T>(t: T) -> (T, T) where T: Clone {
     (t.clone(), t)
 }
+
+struct TestWatchGuard(Arc<AtomicBool>);
+impl AdapterWatchGuard for TestWatchGuard {}
+impl Drop for TestWatchGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed)
+    }
+}
+
 struct TestAdapter {
     id: Id<AdapterId>,
     name: String,
@@ -37,7 +48,14 @@ struct TestAdapter {
     tx_effect: RawSender<Effect>,
     rx_effect: RefCell<Option<Receiver<Effect>>>,
     values: Arc<Mutex<HashMap<Id<Getter>, Result<Value, Error>>>>,
-    senders: Arc<Mutex<HashMap<Id<Setter>, Error>>>
+    senders: Arc<Mutex<HashMap<Id<Setter>, Error>>>,
+    watchers: Arc<Mutex<HashMap<Id<Getter>,
+        Vec<(
+            Option<Range>,
+            Box<ExtSender<WatchEvent>>,
+            RefCell<bool>, /* is_met*/
+            Arc<AtomicBool>, /* is_dropped */
+        )>>>>
 }
 
 impl TestAdapter {
@@ -47,12 +65,64 @@ impl TestAdapter {
 
         let (values_main, values_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
         let (senders_main, senders_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
+        let (watchers_main, watchers_thread) = dup(Arc::new(Mutex::new(HashMap::new())));
+
+        let mutex = Arc::new(Mutex::new(tx));
+        let tweak = move |msg| {
+            let (tx, rx) = channel();
+            mutex.lock().unwrap().send((msg, tx)).unwrap();
+            rx.recv().unwrap();
+        };
+        let result = TestAdapter {
+            id: id.clone(),
+            name: id.as_atom().to_string().clone(),
+            values: values_main,
+            senders: senders_main,
+            tweak: Arc::new(tweak),
+            tx_effect: tx_effect,
+            rx_effect: RefCell::new(Some(rx_effect)),
+            watchers: watchers_main,
+        };
+
         thread::spawn(move || {
             use self::TestOp::*;
             for (msg, tx) in rx {
                 match msg {
                     InjectGetterValue(id, Ok(Some(value))) => {
-                        values_thread.lock().unwrap().insert(id, Ok(value));
+                        values_thread.lock().unwrap().insert(id.clone(), Ok(value.clone()));
+                        if let Some(watchers) = watchers_thread.lock().unwrap().get(&id) {
+                            for &(ref filter, ref cb, ref is_met, ref is_dropped) in watchers {
+                                if is_dropped.load(Ordering::Relaxed) {
+                                    continue;
+                                }
+                                match *filter {
+                                    None => {
+                                        cb.send(WatchEvent::Enter {
+                                            id: id.clone(),
+                                            value: value.clone()
+                                        }).unwrap();
+                                    }
+                                    Some(ref range) => {
+                                        match (range.contains(&value), *is_met.borrow()) {
+                                            (true, false) => {
+                                                cb.send(WatchEvent::Enter {
+                                                    id: id.clone(),
+                                                    value: value.clone()
+                                                }).unwrap();
+                                            }
+                                            (false, true) => {
+                                                cb.send(WatchEvent::Exit {
+                                                    id: id.clone(),
+                                                    value: value.clone()
+                                                }).unwrap();
+                                            }
+                                            _ => {}
+                                        }
+                                        *is_met.borrow_mut() = range.contains(&value);
+                                    }
+                                }
+                            }
+                        }
                     },
                     InjectGetterValue(id, Err(error)) => {
                         values_thread.lock().unwrap().insert(id, Err(error));
@@ -70,21 +140,7 @@ impl TestAdapter {
                 tx.send(()).unwrap();
             }
         });
-        let mutex = Arc::new(Mutex::new(tx));
-        let tweak = move |msg| {
-            let (tx, rx) = channel();
-            mutex.lock().unwrap().send((msg, tx)).unwrap();
-            rx.recv().unwrap();
-        };
-        TestAdapter {
-            id: id.clone(),
-            name: id.as_atom().to_string().clone(),
-            values: values_main,
-            senders: senders_main,
-            tweak: Arc::new(tweak),
-            tx_effect: tx_effect,
-            rx_effect: RefCell::new(Some(rx_effect))
-        }
+        result
     }
 
     fn take_rx(&self) -> Receiver<Effect> {
@@ -143,11 +199,24 @@ impl Adapter for TestAdapter {
         }).collect()
     }
 
-    fn register_watch(&self, sources: Vec<(Id<Getter>, Option<Range>)>,
+    fn register_watch(&self, mut sources: Vec<(Id<Getter>, Option<Range>)>,
         cb: Box<ExtSender<WatchEvent>>) ->
             ResultMap<Id<Getter>, Box<AdapterWatchGuard>, Error>
     {
-        unimplemented!()
+        let mut watchers = self.watchers.lock().unwrap();
+        sources.drain(..).map(|(id, range)| {
+            let is_dropped = Arc::new(AtomicBool::new(false));
+            match watchers.entry(id.clone()) {
+                Occupied(mut entry) => {
+                    entry.get_mut().push((range, cb.clone(), RefCell::new(false), is_dropped.clone()));
+                }
+                Vacant(entry) => {
+                    entry.insert(vec![(range, cb.clone(), RefCell::new(false), is_dropped.clone())]);
+                }
+            }
+            let guard = Box::new(TestWatchGuard(is_dropped.clone())) as Box<AdapterWatchGuard>;
+            (id, Ok(guard))
+        }).collect()
     }
 }
 
@@ -1258,3 +1327,313 @@ fn test_send() {
     println!("");
 }
 
+
+#[test]
+fn test_watch() {
+    println!("");
+    let manager = AdapterManager::new();
+    let id_1 = Id::<AdapterId>::new("adapter id 1");
+    let id_2 = Id::<AdapterId>::new("adapter id 2");
+
+
+    let getter_id_1_1 = Id::<Getter>::new("getter id 1.1");
+    let getter_id_1_2 = Id::<Getter>::new("getter id 1.2");
+    let getter_id_1_3 = Id::<Getter>::new("getter id 1.3");
+    let getter_id_2 = Id::<Getter>::new("getter id 2");
+
+    let service_id_1 = Id::<ServiceId>::new("service id 1");
+    let service_id_2 = Id::<ServiceId>::new("service id 2");
+
+    let getter_1_1 = Channel {
+        id: getter_id_1_1.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_1_2 = Channel {
+        id: getter_id_1_2.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_1_3 = Channel {
+        id: getter_id_1_3.clone(),
+        service: service_id_1.clone(),
+        adapter: id_1.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let getter_2 = Channel {
+        id: getter_id_2.clone(),
+        service: service_id_2.clone(),
+        adapter: id_2.clone(),
+        last_seen: None,
+        tags: HashSet::new(),
+        mechanism: Getter {
+            updated: None,
+            kind: ChannelKind::OnOff,
+            watch: false,
+            poll: None,
+            trigger: None,
+        },
+    };
+
+    let service_1 = Service {
+        id: service_id_1.clone(),
+        adapter: id_1.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let service_2 = Service {
+        id: service_id_2.clone(),
+        adapter: id_2.clone(),
+        tags: HashSet::new(),
+        getters: HashMap::new(),
+        setters: HashMap::new(),
+    };
+
+    let tag_1 = Id::<TagId>::new("tag 1");
+
+    let adapter_1 = TestAdapter::new(&id_1);
+    let adapter_2 = TestAdapter::new(&id_2);
+    let tweak_1 = adapter_1.tweak.clone();
+    let tweak_2 = adapter_2.tweak.clone();
+
+    let mut guards = vec![];
+
+    println!("* Without adapters, watching values from a selector that has no channels does nothing.");
+    let (tx_watch_1, rx_watch_1) = channel();
+    thread::spawn(move || {
+        for msg in rx_watch_1 {
+            panic!("We should not have received any message {:?}", msg);
+        }
+    });
+    guards.push(manager.watch_values(vec![(
+        vec![GetterSelector::new().with_id(Id::new("No such getter"))],
+        Exactly::Always
+    )], Box::new(tx_watch_1)));
+
+    println!("* With adapters, watching values from a selector that has no channels does nothing.");
+    manager.add_adapter(Box::new(adapter_1)).unwrap();
+    manager.add_adapter(Box::new(adapter_2)).unwrap();
+    manager.add_service(service_1.clone()).unwrap();
+    manager.add_service(service_2.clone()).unwrap();
+    let (tx_watch, rx_watch) = channel();
+    thread::spawn(move || {
+        for msg in rx_watch {
+            panic!("We should not have received any message {:?}", msg);
+        }
+    });
+    guards.push(manager.watch_values(vec![(
+        vec![GetterSelector::new().with_id(Id::new("No such getter"))],
+        Exactly::Always
+    )], Box::new(tx_watch)));
+
+    println!("* We can observe channels being added.");
+    let (tx_watch, rx_watch) = channel();
+    let guard = manager.watch_values(vec![(
+        vec![GetterSelector::new()],
+        Exactly::Always
+    )], Box::new(tx_watch));
+
+    manager.add_getter(getter_1_1.clone()).unwrap();
+    manager.add_getter(getter_1_2.clone()).unwrap();
+    manager.add_getter(getter_1_3.clone()).unwrap();
+    manager.add_getter(getter_2.clone()).unwrap();
+
+    let events : HashSet<_> = (0..4).map(|_| {
+        match rx_watch.recv().unwrap() {
+            Event::GetterAdded(id) => id,
+            other => panic!("Unexpected event {:?}", other)
+        }
+    }).collect();
+
+    assert_eq!(events.len(), 4);
+
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We can observe channels being removed.");
+
+    manager.remove_getter(&getter_id_1_2).unwrap();
+    match rx_watch.recv().unwrap() {
+        Event::GetterRemoved(ref id) if *id == getter_id_1_2 => {}
+        other => panic!("Unexpected event {:?}", other)
+    }
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We can observe value changes.");
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_3.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    let events : HashMap<_, _> = (0..2).map(|_| {
+        match rx_watch.recv().unwrap() {
+            Event::EnterRange {
+                from,
+                value
+            } => (from, value),
+            other => panic!("Unexpected event {:?}", other)
+        }
+    }).collect();
+    assert_eq!(events.get(&getter_id_1_1).unwrap(), &Value::OnOff(OnOff::On));
+    assert_eq!(events.get(&getter_id_1_3).unwrap(), &Value::OnOff(OnOff::Off));
+
+    println!("* We only observe channels that still exist.");
+    assert!(rx_watch.try_recv().is_err());
+
+    println!("* We can have several watchers at once");
+    assert_eq!(manager.add_getter_tags(vec![
+        GetterSelector::new().with_id(getter_id_1_3.clone()),
+        GetterSelector::new().with_id(getter_id_2.clone()),
+    ], vec![tag_1.clone()]), 2);
+
+    let (tx_watch_2, rx_watch_2) = channel();
+    let guard_2 = manager.watch_values(vec![(
+        vec![
+            GetterSelector::new()
+                .with_tags(vec![tag_1.clone()])
+        ],
+        Exactly::Exactly(Range::Geq(Value::OnOff(OnOff::On)))
+    )], Box::new(tx_watch_2));
+
+    println!("* Value changes are observed on both watchers");
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_3.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    tweak_2(TestOp::InjectGetterValue(getter_id_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    let mut events : HashMap<_, _> = (0..3).map(|i| {
+        println!("Waiting for observation {}", i);
+        match rx_watch.recv().unwrap() {
+            Event::EnterRange { from, value } => (from, value),
+            other => panic!("Unexpected event {:?}", other)
+        }
+    }).collect();
+    println!("Waiting for observation from other watch");
+    match rx_watch_2.recv().unwrap() {
+        Event::ExitRange { from, value } => {
+            events.insert(from, value);
+        }
+        other => panic!("Unexpected event {:?}", other)
+    }
+    assert_eq!(events.len(), 3);
+
+    println!("* We do not receive notifications anymore once we have dropped the guard.");
+    drop(guard);
+
+    // FIXME: Implement.
+
+/*
+    println!("* Fetching empty values from a selector that has channels returns a vector of empty values.");
+    manager.add_getter(getter_1_1.clone()).unwrap();
+    manager.add_getter(getter_1_2.clone()).unwrap();
+    manager.add_getter(getter_1_3.clone()).unwrap();
+    manager.add_getter(getter_2.clone()).unwrap();
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
+    assert_eq!(data.len(), 4);
+
+    for result in data.values() {
+        if let Ok(None) = *result {
+            // We're good.
+        } else {
+            panic!("Unexpected result {:?}", result)
+        }
+    }
+
+    println!("* Fetching values returns the right values.");
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OnOff(OnOff::On)))));
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_2.clone(), Ok(Some(Value::OnOff(OnOff::Off)))));
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
+    assert_eq!(data.len(), 4);
+    match data.get(&getter_id_1_1) {
+        Some(&Ok(Some(Value::OnOff(OnOff::On)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+
+    println!("* Fetching values returns the right errors.");
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Err(Error::InternalError(InternalError::NoSuchGetter(getter_id_1_1.clone())))));
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
+    assert_eq!(data.len(), 4);
+    match data.get(&getter_id_1_1) {
+        Some(&Err(Error::InternalError(InternalError::NoSuchGetter(ref id)))) if *id == getter_id_1_1 => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+
+    println!("* Fetching a value that causes an internal type error returns that error.");
+    tweak_1(TestOp::InjectGetterValue(getter_id_1_1.clone(), Ok(Some(Value::OpenClosed(OpenClosed::Open)))));
+    let data = manager.fetch_values(vec![GetterSelector::new()]);
+    assert_eq!(data.len(), 4);
+    match data.get(&getter_id_1_1) {
+        Some(&Err(Error::TypeError(TypeError {
+            got: Type::OpenClosed,
+            expected: Type::OnOff,
+        }))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_2) {
+        Some(&Ok(Some(Value::OnOff(OnOff::Off)))) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_1_3) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+    match data.get(&getter_id_2) {
+        Some(&Ok(None)) => {},
+        other => panic!("Unexpected result, {:?}", other)
+    }
+*/
+    // FIXME: Should test watching with tags.
+
+    println!("");
+}

@@ -470,27 +470,31 @@ impl AdapterManagerState {
         }
     }
 
-    fn aux_getter_may_need_unregistration(getter_data: &mut GetterData) {
+    fn aux_getter_may_need_unregistration(getter_data: &mut GetterData, is_being_removed: bool) {
         let mut keys_to_drop = vec![];
         {
             for (key, ref watcher) in &getter_data.watchers {
-                for &(ref selectors, _) in &watcher.watch {
-                    let should_disconnect = selectors.iter().find(|selector| {
-                        !getter_data.matches(selector)
+                // We need to disconnect the watcher if either it is being removed
+                // or it doesn't match anymore any of the selectors for the watchers
+                // that were watching it.
+                let should_disconnect = is_being_removed
+                    || watcher.watch.iter().find(|&&(ref selectors, _)| {
+                        selectors.iter().find(|selector| {
+                            !getter_data.matches(selector)
+                        }).is_some()
                     }).is_some();
-                    if !should_disconnect {
-                        // The channel hasn't stopped matching this watcher.
-                        continue;
-                    }
-
-                    // Inform of topology change
-                    let on_event = &watcher.on_event;
-                    let _ = on_event.send(WatchEvent::GetterRemoved(getter_data.id.clone()));
-
-                    // Drop individual guard.
-                    watcher.guards.borrow_mut().remove(&getter_data.id);
-                    keys_to_drop.push(*key);
+                if !should_disconnect {
+                    // The channel hasn't stopped matching this watcher.
+                    continue;
                 }
+
+                // Inform of topology change
+                let on_event = &watcher.on_event;
+                let _ = on_event.send(WatchEvent::GetterRemoved(getter_data.id.clone()));
+
+                // Drop individual guard.
+                watcher.guards.borrow_mut().remove(&getter_data.id);
+                keys_to_drop.push(*key);
             }
         }
         for key in keys_to_drop {
@@ -510,6 +514,10 @@ impl AdapterManagerState {
                 Some(getter_data) => {
                     // Determine if the channel matches an ongoing watcher.
                     for watcher in &mut self.watchers.lock().unwrap().watchers.values() {
+                        if watcher.guards.borrow().contains_key(&id) {
+                            // The watcher already matches this getter.
+                            continue;
+                        }
                         for &(ref selectors, ref filter) in &watcher.watch {
                             let matches = selectors.iter().find(|selector| {
                                 getter_data.borrow().matches(selector)
@@ -899,7 +907,7 @@ impl AdapterManagerState {
             None => return Err(Error::InternalError(InternalError::NoSuchGetter(id))),
             Some(getter) => getter
         };
-        Self::aux_getter_may_need_unregistration(&mut *getter.borrow_mut());
+        Self::aux_getter_may_need_unregistration(&mut *getter.borrow_mut(), true);
 
         let service_id = &getter.borrow().channel.service;
         match self.service_by_id.get_mut(&service_id) {
@@ -1054,7 +1062,7 @@ impl AdapterManagerState {
         let mut result = 0;
         Self::with_channels_mut(selectors, &mut self.getter_by_id, |mut data| {
             data.remove_tags(&tags);
-            Self::aux_getter_may_need_unregistration(&mut data);
+            Self::aux_getter_may_need_unregistration(&mut data, false);
             result += 1;
         });
         result
@@ -1257,8 +1265,8 @@ impl AdapterManagerState {
         }
 
         // Sanity check
-        debug_assert!(Arc::get_mut(&mut watcher_data).is_none(),
-            "We still have dangling pointers to a watcher. That's not good");
+        debug_assert!(Arc::get_mut(&mut watcher_data).is_some(),
+            "This watcher is being unregistered but we still have strong references to it. That's not good.");
 
         // At this stage, `watcher_data` has no reference left. All its `guards` will be dropped.
     }
