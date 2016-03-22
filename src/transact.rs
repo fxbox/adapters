@@ -20,7 +20,7 @@ use std::hash::Hash;
 /// let mut map = HashMap::new();
 ///
 /// {
-///   let mut transaction = InsertInMap::start(&mut map, vec![(1, 1)]).unwrap();
+///   let transaction = InsertInMap::start(&mut map, vec![(1, 1)]).unwrap();
 ///
 /// # let some_condition = true;
 ///   if some_condition {

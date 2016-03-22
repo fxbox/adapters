@@ -25,7 +25,7 @@ use std::sync::atomic::{ AtomicBool, Ordering };
 /// Used to build `Service` values.
 struct ServiceData {
     /// The tags, as in a Service.
-    tags: HashSet<Id<TagId>>,
+    tags: Rc<RefCell<HashSet<Id<TagId>>>>,
 
     /// The id, as in a `Service`.
     id: Id<ServiceId>,
@@ -47,7 +47,7 @@ impl ServiceData {
     /// Any `getters` or `setters` will be ignored!
     fn new(service: Service) -> Self {
         ServiceData {
-            tags: service.tags,
+            tags: Rc::new(RefCell::new(service.tags)),
             id: service.id,
             adapter: service.adapter,
             getters: HashMap::new(),
@@ -56,7 +56,7 @@ impl ServiceData {
     }
     fn as_service(&self) -> Service {
         Service {
-            tags: self.tags.clone(),
+            tags: self.tags.borrow().clone(),
             id: self.id.clone(),
             adapter: self.adapter.clone(),
             getters: self.getters.iter().map(|(key, value)| {
@@ -72,11 +72,11 @@ impl ServiceLike for ServiceData {
     fn id(&self) -> &Id<ServiceId> {
         &self.id
     }
-    fn tags(&self) -> &HashSet<Id<TagId>> {
-        &self.tags
-    }
     fn adapter(&self) -> &Id<AdapterId> {
         &self.adapter
+    }
+    fn with_tags<F>(&self, f: F) -> bool where F: Fn(&HashSet<Id<TagId>>) -> bool {
+        f(&*self.tags.borrow())
     }
     fn has_getters<F>(&self, f: F) -> bool where F: Fn(&Channel<Getter>) -> bool {
         for chan in self.getters.values() {
@@ -146,20 +146,24 @@ struct GetterData {
     /// The getter itself.
     channel: Channel<Getter>,
 
+    /// The tags of the service.
+    service_tags: Rc<RefCell<HashSet<Id<TagId>>>>,
+
     /// Watchers that currently watch this channel.
     watchers: HashMap<WatchKey, Arc<WatcherData>>,
 }
-impl GetterData {
-    fn new(getter: Channel<Getter>) -> Self {
-        GetterData {
-            channel: getter,
-            watchers: HashMap::new(),
-        }
-    }
-}
 impl SelectedBy<GetterSelector> for GetterData {
     fn matches(&self, selector: &GetterSelector) -> bool {
-        self.channel.matches(selector)
+        selector.matches(&*self.service_tags.borrow(), &self.channel)
+    }
+}
+impl GetterData {
+    fn new(channel: Channel<Getter>, service_tags: Rc<RefCell<HashSet<Id<TagId>>>>) -> Self {
+        GetterData {
+            channel: channel,
+            service_tags: service_tags.clone(),
+            watchers: HashMap::new(),
+        }
     }
 }
 
@@ -179,17 +183,19 @@ impl Tagged for GetterData {
 }
 struct SetterData {
     channel: Channel<Setter>,
-}
-impl SetterData {
-    fn new(channel: Channel<Setter>) -> Self {
-        SetterData {
-            channel: channel
-        }
-    }
+    service_tags: Rc<RefCell<HashSet<Id<TagId>>>>,
 }
 impl SelectedBy<SetterSelector> for SetterData {
     fn matches(&self, selector: &SetterSelector) -> bool {
-        self.channel.matches(selector)
+        selector.matches(&*self.service_tags.borrow(), &self.channel)
+    }
+}
+impl SetterData {
+    fn new(channel: Channel<Setter>, service_tags: Rc<RefCell<HashSet<Id<TagId>>>>) -> Self {
+        SetterData {
+            channel: channel,
+            service_tags: service_tags.clone(),
+        }
     }
 }
 impl Tagged for SetterData {
@@ -512,6 +518,7 @@ impl AdapterManagerState {
                     // FIXME: Logging would be nice.
                 },
                 Some(getter_data) => {
+                    let mut getter_data = getter_data.borrow_mut();
                     // Determine if the channel matches an ongoing watcher.
                     for watcher in &mut self.watchers.lock().unwrap().watchers.values() {
                         if watcher.guards.borrow().contains_key(&id) {
@@ -520,7 +527,7 @@ impl AdapterManagerState {
                         }
                         for &(ref selectors, ref filter) in &watcher.watch {
                             let matches = selectors.iter().find(|selector| {
-                                getter_data.borrow().matches(selector)
+                                getter_data.matches(selector)
                             }).is_some();
                             if !matches {
                                 // The channel doesn't match this watcher.
@@ -532,7 +539,7 @@ impl AdapterManagerState {
                             let _ = on_event.send(WatchEvent::GetterAdded(id.clone()));
 
                             // Register to be informed of future changes.
-                            Self::aux_channel_watch_per_chan(&mut watcher.clone(), &mut *getter_data.borrow_mut(), filter, &mut per_adapter)
+                            Self::aux_channel_watch_per_chan(&mut watcher.clone(), &mut *getter_data, filter, &mut per_adapter)
                         }
                     }
                 }
@@ -868,11 +875,12 @@ impl AdapterManagerState {
                 None => return Err(Error::InternalError(InternalError::NoSuchService(getter.service.clone()))),
                 Some(service) => service
             };
-            if service.borrow().adapter != getter.adapter {
-                return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), getter.adapter.clone())));
+            let mut service = &mut *service.borrow_mut();
+            if service.adapter != getter.adapter {
+                return Err(Error::InternalError(InternalError::ConflictingAdapter(service.adapter.clone(), getter.adapter.clone())));
             }
-            let getters = &mut service.borrow_mut().getters;
-            let getter_data = Rc::new(RefCell::new(GetterData::new(getter)));
+            let getters = &mut service.getters;
+            let getter_data = Rc::new(RefCell::new(GetterData::new(getter, service.tags.clone())));
 
             let insert_in_service = match InsertInMap::start(getters, vec![(id.clone(), getter_data.clone())]) {
                 Ok(transaction) => transaction,
@@ -940,14 +948,15 @@ impl AdapterManagerState {
             None => return Err(Error::InternalError(InternalError::NoSuchService(setter.service.clone()))),
             Some(service) => service
         };
-        if service.borrow().adapter != setter.adapter {
-            return Err(Error::InternalError(InternalError::ConflictingAdapter(service.borrow().adapter.clone(), setter.adapter)));
+        let mut service = &mut *service.borrow_mut();
+        if service.adapter != setter.adapter {
+            return Err(Error::InternalError(InternalError::ConflictingAdapter(service.adapter.clone(), setter.adapter)));
         }
 
         let id = setter.id.clone();
-        let setter_data = Rc::new(RefCell::new(SetterData::new(setter)));
+        let setters = &mut service.setters;
+        let setter_data = Rc::new(RefCell::new(SetterData::new(setter, service.tags.clone())));
 
-        let setters = &mut service.borrow_mut().setters;
         let insert_in_service = match InsertInMap::start(setters, vec![(id.clone(), setter_data.clone())]) {
             Ok(transaction) => transaction,
             Err(id) => return Err(Error::InternalError(InternalError::DuplicateSetter(id)))
@@ -1001,7 +1010,8 @@ impl AdapterManagerState {
     fn add_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
-            let tag_set = &mut service.borrow_mut().tags;
+            let service = service.borrow_mut();
+            let mut tag_set = service.tags.borrow_mut();
             for tag in &tags {
                 let _ = tag_set.insert(tag.clone());
             }
@@ -1013,7 +1023,8 @@ impl AdapterManagerState {
     fn remove_service_tags(&self, selectors: Vec<ServiceSelector>, tags: Vec<Id<TagId>>) -> usize {
         let mut result = 0;
         self.with_services(selectors, |service| {
-            let tag_set = &mut service.borrow_mut().tags;
+            let service = service.borrow_mut();
+            let mut tag_set = service.tags.borrow_mut();
             for tag in &tags {
                 let _ = tag_set.remove(&tag);
             }
