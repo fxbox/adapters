@@ -116,6 +116,7 @@ pub enum WatchEvent {
         id: Id<Getter>,
         value: Value
     },
+
     /// Fired when we exit the range specified when we started watching. If no range was
     /// specified, never fired.
     Exit {

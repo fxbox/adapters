@@ -84,9 +84,6 @@ fn test_add_remove_services() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -99,7 +96,6 @@ fn test_add_remove_services() {
         mechanism: Setter {
             updated: None,
             kind: ChannelKind::OnOff,
-            push: None,
         },
     };
 
@@ -112,9 +108,6 @@ fn test_add_remove_services() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -127,7 +120,6 @@ fn test_add_remove_services() {
         mechanism: Setter {
             updated: None,
             kind: ChannelKind::OnOff,
-            push: None,
         },
     };
 
@@ -158,9 +150,6 @@ fn test_add_remove_services() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -173,7 +162,6 @@ fn test_add_remove_services() {
         mechanism: Setter {
             updated: None,
             kind: ChannelKind::OnOff,
-            push: None,
         },
     };
 
@@ -392,9 +380,6 @@ fn test_add_remove_tags() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -407,7 +392,6 @@ fn test_add_remove_tags() {
         mechanism: Setter {
             updated: None,
             kind: ChannelKind::OnOff,
-            push: None,
         },
     };
 
@@ -428,9 +412,6 @@ fn test_add_remove_tags() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -443,7 +424,6 @@ fn test_add_remove_tags() {
         mechanism: Setter {
             updated: None,
             kind: ChannelKind::OnOff,
-            push: None,
         },
     };
 
@@ -745,9 +725,6 @@ fn test_fetch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -760,9 +737,6 @@ fn test_fetch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -775,9 +749,6 @@ fn test_fetch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -790,9 +761,6 @@ fn test_fetch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -937,7 +905,6 @@ fn test_send() {
         mechanism: Setter {
             kind: ChannelKind::OnOff,
             updated: None,
-            push: None,
         },
     };
 
@@ -950,7 +917,6 @@ fn test_send() {
         mechanism: Setter {
             kind: ChannelKind::OnOff,
             updated: None,
-            push: None,
         },
     };
 
@@ -963,7 +929,6 @@ fn test_send() {
         mechanism: Setter {
             kind: ChannelKind::OnOff,
             updated: None,
-            push: None,
         },
     };
 
@@ -976,7 +941,6 @@ fn test_send() {
         mechanism: Setter {
             kind: ChannelKind::OnOff,
             updated: None,
-            push: None,
         },
     };
 
@@ -1151,9 +1115,6 @@ fn test_watch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -1166,9 +1127,6 @@ fn test_watch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -1181,9 +1139,6 @@ fn test_watch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -1196,9 +1151,6 @@ fn test_watch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
@@ -1211,9 +1163,6 @@ fn test_watch() {
         mechanism: Getter {
             updated: None,
             kind: ChannelKind::OnOff,
-            watch: false,
-            poll: None,
-            trigger: None,
         },
     };
 
