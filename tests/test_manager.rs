@@ -137,6 +137,7 @@ fn test_add_remove_services() {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -169,6 +170,7 @@ fn test_add_remove_services() {
         id: service_id_2.clone(),
         adapter: id_2.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -399,6 +401,7 @@ fn test_add_remove_tags() {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -431,6 +434,7 @@ fn test_add_remove_tags() {
         id: service_id_2.clone(),
         adapter: id_2.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -768,6 +772,7 @@ fn test_fetch() {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -776,6 +781,7 @@ fn test_fetch() {
         id: service_id_2.clone(),
         adapter: id_2.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -948,6 +954,7 @@ fn test_send() {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -956,6 +963,7 @@ fn test_send() {
         id: service_id_2.clone(),
         adapter: id_2.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -1170,6 +1178,7 @@ fn test_watch() {
         id: service_id_1.clone(),
         adapter: id_1.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
@@ -1178,6 +1187,7 @@ fn test_watch() {
         id: service_id_2.clone(),
         adapter: id_2.clone(),
         tags: HashSet::new(),
+        properties: HashMap::new(),
         getters: HashMap::new(),
         setters: HashMap::new(),
     };
