@@ -30,6 +30,9 @@ struct ServiceData {
     /// The id, as in a `Service`.
     id: Id<ServiceId>,
 
+    /// Creation time properties.
+    properties: HashMap<String, String>,
+
     /// Information on the getters. Used to build field `getters` of service.
     getters: HashMap<Id<Getter>, Rc<RefCell<GetterData>>>,
 
@@ -50,6 +53,7 @@ impl ServiceData {
             tags: Rc::new(RefCell::new(service.tags)),
             id: service.id,
             adapter: service.adapter,
+            properties: service.properties,
             getters: HashMap::new(),
             setters: HashMap::new(),
         }
@@ -58,6 +62,7 @@ impl ServiceData {
         Service {
             tags: self.tags.borrow().clone(),
             id: self.id.clone(),
+            properties: self.properties.clone(),
             adapter: self.adapter.clone(),
             getters: self.getters.iter().map(|(key, value)| {
                 (key.clone(), (**value).borrow().channel.clone())
