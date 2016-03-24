@@ -1,6 +1,5 @@
-# FoxBox Adapter API
+# DO NOT USE THIS REPOSITORY ANYMORE.
 
-[![Build Status](https://api.travis-ci.org/fxbox/adapters.svg?branch=master)](https://travis-ci.org/fxbox/adapters)
-[![Clippy Linting Result](http://clippy.bashy.io/github/fxbox/adapters/master/badge.svg)](http://clippy.bashy.io/github/fxbox/adapters/master/log)
+All the contents have been merged into https://github.com/fxbox/taxonomy .
 
-The API to define and attach new adapters to the FoxBox.
+We keep this reposiotry open just long enough to merge issues.
